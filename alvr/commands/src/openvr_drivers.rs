@@ -40,6 +40,8 @@ pub fn driver_registration(driver_paths: &[PathBuf], register: bool) -> StrResul
     crate::save_openvr_paths_json(&openvr_paths_json)
 }
 
+// 获取已经注册了的驱动
+// 方法是读取openvrpaths.vrpath文件，然后解析json，从中获取external_drivers字段
 pub fn get_driver_dir_from_registered() -> StrResult<PathBuf> {
     for dir in get_registered_drivers()? {
         let maybe_driver_name = || -> StrResult<_> {

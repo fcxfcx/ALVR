@@ -327,6 +327,7 @@ async fn http_api(
                     other_path => other_path,
                 };
 
+                // 获取dashboard静态资源文件
                 let maybe_file = tokio::fs::File::open(format!(
                     "{}{path_branch}",
                     FILESYSTEM_LAYOUT.dashboard_dir().to_string_lossy(),
@@ -365,12 +366,14 @@ pub async fn web_server(
     legacy_events_sender: broadcast::Sender<String>,
     events_sender: broadcast::Sender<Event>,
 ) -> StrResult {
+    // 从SERVER_DATA_MANAGER中读取配置，获得web_server_port，默认是8082
     let web_server_port = SERVER_DATA_MANAGER
         .read()
         .settings()
         .connection
         .web_server_port;
 
+    // 配置http服务
     let service = service::make_service_fn(|_| {
         let log_sender = log_sender.clone();
         let legacy_events_sender = legacy_events_sender.clone();
@@ -393,6 +396,7 @@ pub async fn web_server(
         }
     });
 
+    // 绑定端口，启动服务
     hyper::Server::bind(&SocketAddr::new(
         "0.0.0.0".parse().unwrap(),
         web_server_port,

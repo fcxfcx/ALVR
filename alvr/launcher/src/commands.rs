@@ -119,11 +119,13 @@ pub fn maybe_register_alvr_driver() -> StrResult {
     let alvr_driver_dir = afs::filesystem_layout_from_launcher_exe(&env::current_exe().unwrap())
         .openvr_driver_root_dir;
 
+    // 检查alvr driver是否已经注册
     let driver_registered = alvr_commands::get_driver_dir_from_registered()
         .ok()
         .filter(|dir| *dir == alvr_driver_dir)
         .is_some();
 
+    // 如果没有注册，则获取已经注册的driver，备份，然后注册alvr driver
     if !driver_registered {
         let paths_backup = match alvr_commands::get_registered_drivers() {
             Ok(paths) => paths,
@@ -136,6 +138,7 @@ pub fn maybe_register_alvr_driver() -> StrResult {
             )
             }
         };
+        println!("Backup: {:?}", paths_backup);
 
         alvr_commands::maybe_save_driver_paths_backup(&paths_backup)?;
 

@@ -232,6 +232,7 @@ pub fn notify_application_update() {
 }
 
 fn init() {
+    // 配置日志相关的服务，启动channel
     let (log_sender, _) = broadcast::channel(web_server::WS_BROADCAST_CAPACITY);
     let (legacy_events_sender, _) = broadcast::channel(web_server::WS_BROADCAST_CAPACITY);
     let (events_sender, _) = broadcast::channel(web_server::WS_BROADCAST_CAPACITY);
@@ -246,11 +247,13 @@ fn init() {
         // this is needed until Settings.cpp is replaced with Rust. todo: remove
         SERVER_DATA_MANAGER.write().session_mut();
 
+        // 获取当前的客户端连接列表，返回的是一个HashMap
         let connections = SERVER_DATA_MANAGER
             .read()
             .session()
             .client_connections
             .clone();
+        // 遍历客户端连接列表，如果客户端连接不是可信的，就从客户端连接列表中删除
         for (hostname, connection) in connections {
             if !connection.trusted {
                 SERVER_DATA_MANAGER
@@ -259,12 +262,14 @@ fn init() {
             }
         }
 
+        // 通过Runtime::spawn方法，启动一个异步任务，这个异步任务会启动一个web服务器
         runtime.spawn(alvr_common::show_err_async(web_server::web_server(
             log_sender,
             legacy_events_sender,
             events_sender,
         )));
 
+        // 通过Runtime::spawn方法，启动一个异步任务，这个异步任务会启动UI线程，展示前端界面
         thread::spawn(|| alvr_common::show_err(dashboard::ui_thread()));
     }
 
