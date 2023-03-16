@@ -69,6 +69,7 @@ impl ProtoControlSocket {
                     .iter()
                     .map(|&ip| (ip, CONTROL_PORT).into())
                     .collect::<Vec<_>>();
+                // TcpStream::connect()会尝试连接所有的地址，直到某一个成功或者全部失败（只会返回第一个成功的）
                 TcpStream::connect(client_addresses.as_slice())
                     .await
                     .map_err(err!())?

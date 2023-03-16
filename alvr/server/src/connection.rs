@@ -39,6 +39,7 @@ use tokio::{
     time,
 };
 
+// 重试连接的最小间隔，设定为1s
 const RETRY_CONNECT_MIN_INTERVAL: Duration = Duration::from_secs(1);
 
 static CONNECTED_CLIENT_HOSTNAMES: Lazy<parking_lot::Mutex<HashSet<String>>> =
@@ -52,16 +53,20 @@ fn align32(value: f32) -> u32 {
 
 // Alternate connection trials with manual IPs and clients discovered on the local network
 pub fn handshake_loop(frame_interval_sender: smpsc::Sender<Duration>) -> IntResult {
+    // 构造一个 WelcomeSocket
     let mut welcome_socket = WelcomeSocket::new().map_err(to_int_e!())?;
 
     loop {
+        // IS_ALIVE表示driver配置好了
         check_interrupt!(IS_ALIVE.value());
 
+        // 从ServerDataManager中获取client_list，处理手动添加的client
         let manual_client_ips = {
             let connected_hostnames_lock = CONNECTED_CLIENT_HOSTNAMES.lock();
             let mut manual_client_ips = HashMap::new();
             for (hostname, connection_info) in SERVER_DATA_MANAGER.read().client_list() {
                 if !connected_hostnames_lock.contains(hostname) {
+                    // 添加未连接的client的ip和hostname
                     for ip in &connection_info.manual_ips {
                         manual_client_ips.insert(*ip, hostname.clone());
                     }
@@ -73,10 +78,12 @@ pub fn handshake_loop(frame_interval_sender: smpsc::Sender<Duration>) -> IntResu
         if !manual_client_ips.is_empty()
             && try_connect(manual_client_ips, frame_interval_sender.clone()).is_ok()
         {
+            // 如果手动添加的client列表不为空，且连接成功，则1s后到下一次循环
             thread::sleep(RETRY_CONNECT_MIN_INTERVAL);
             continue;
         }
 
+        // 处理自动发现的client
         let discovery_config = SERVER_DATA_MANAGER
             .read()
             .settings()
@@ -85,12 +92,13 @@ pub fn handshake_loop(frame_interval_sender: smpsc::Sender<Duration>) -> IntResu
             .clone();
         if let Switch::Enabled(config) = discovery_config {
             let (client_hostname, client_ip) = match welcome_socket.recv_non_blocking() {
+                // 接收新的client连接并返回hostname和ip
                 Ok(pair) => pair,
                 Err(e) => {
                     if let InterruptibleError::Other(e) = e {
                         warn!("UDP handshake listening error: {e}");
                     }
-
+                    // 对于其他错误，1s后重试
                     thread::sleep(RETRY_CONNECT_MIN_INTERVAL);
                     continue;
                 }
@@ -102,11 +110,13 @@ pub fn handshake_loop(frame_interval_sender: smpsc::Sender<Duration>) -> IntResu
                 data_manager
                     .update_client_list(client_hostname.clone(), ClientListAction::AddIfMissing);
 
+                // 查看是否配置为自动信任client，如果是需要更新client_list并设置trusted为true
                 if config.auto_trust_clients {
                     data_manager
                         .update_client_list(client_hostname.clone(), ClientListAction::Trust);
                 }
 
+                // 确认client是否被信任
                 data_manager
                     .client_list()
                     .get(&client_hostname)
@@ -115,6 +125,7 @@ pub fn handshake_loop(frame_interval_sender: smpsc::Sender<Duration>) -> IntResu
             };
 
             // do not attempt connection if the client is already connected
+            // 对于已经信任且连接的client，尝试连接
             if trusted && !CONNECTED_CLIENT_HOSTNAMES.lock().contains(&client_hostname) {
                 if let Err(e) = try_connect(
                     [(client_ip, client_hostname.clone())].into_iter().collect(),
@@ -137,10 +148,13 @@ fn try_connect(
 
     let (mut proto_socket, client_ip) = runtime
         .block_on(async {
+            // 作为发起连接的一方去连接
+            // 这个方法虽然接收的是一个Hashmap，只会返回第一个连接成功的socket
             let get_proto_socket = ProtoControlSocket::connect_to(PeerType::AnyClient(
                 client_ips.keys().cloned().collect(),
             ));
             tokio::select! {
+                // 如果1s内连接成功，则返回连接的socket和client_ip，否则就认为连接失败
                 proto_socket = get_proto_socket => proto_socket,
                 _ = time::sleep(Duration::from_secs(1)) => {
                     fmt_e!("Control socket failed to connect")
@@ -150,13 +164,16 @@ fn try_connect(
         .map_err(to_int_e!())?;
 
     // Safety: this never panics because client_ip is picked from client_ips keys
+    // 连接成功的socket，会被从client_ips中移除
     let client_hostname = client_ips.remove(&client_ip).unwrap();
 
+    // 把连接成功的client的hostname加入到ServerDataManager的connected_client_hostnames中
     SERVER_DATA_MANAGER.write().update_client_list(
         client_hostname.clone(),
         ClientListAction::UpdateCurrentIp(Some(client_ip)),
     );
 
+    // 尝试去接收StreamingCapabilities和display name，注意proto_socket.recv()返回的是一个结构体（反序列化得来的）
     let maybe_streaming_caps = if let ClientConnectionResult::ConnectionAccepted {
         display_name,
         streaming_capabilities,
@@ -164,18 +181,22 @@ fn try_connect(
     } = runtime.block_on(proto_socket.recv()).map_err(to_int_e!())?
     {
         SERVER_DATA_MANAGER.write().update_client_list(
+            // client_list是一个哈希表，通过hostname作为key，找到的value都是ClientConnectionDecs结构体
+            // 这里去更新ClientConnectionDecs结构体中的display_name属性
             client_hostname.clone(),
             ClientListAction::SetDisplayName(display_name),
         );
 
         streaming_capabilities
     } else {
+        // 没收到说明连接处于standby状态，直接返回
         debug!("Found client in standby. Retrying");
         return Ok(());
     };
 
     let streaming_caps = if let Some(streaming_caps) = maybe_streaming_caps {
         if let Some(hostname) = &*STREAMING_CLIENT_HOSTNAME.lock() {
+            // 如果已经有一个StreamingClient连接了，就返回错误
             return int_fmt_e!("Streaming client {hostname} is already connected!");
         } else {
             streaming_caps
@@ -186,6 +207,8 @@ fn try_connect(
 
     let settings = SERVER_DATA_MANAGER.read().settings().clone();
 
+    // 配置streaming的分辨率，可以是相对于默认分辨率的比例，也可以是绝对的分辨率
+    // 默认的分辨率是对应Quest的2880x1600，默认的scale是0.75
     let stream_view_resolution = match settings.video.render_resolution {
         FrameSize::Scale(scale) => streaming_caps.default_view_resolution.as_vec2() * scale,
         FrameSize::Absolute { width, height } => Vec2::new(width as f32 / 2_f32, height as f32),
@@ -195,6 +218,7 @@ fn try_connect(
         align32(stream_view_resolution.y),
     );
 
+    // 默认的推荐分辨率scale也是0.75
     let target_view_resolution = match settings.video.recommended_target_resolution {
         FrameSize::Scale(scale) => streaming_caps.default_view_resolution.as_vec2() * scale,
         FrameSize::Absolute { width, height } => Vec2::new(width as f32 / 2_f32, height as f32),
@@ -204,6 +228,7 @@ fn try_connect(
         align32(target_view_resolution.y),
     );
 
+    // 配置streaming的fps（默认是72）
     let fps = {
         let mut best_match = 0_f32;
         let mut min_diff = f32::MAX;
@@ -217,6 +242,7 @@ fn try_connect(
         best_match
     };
 
+    // 判断fps是否在支持的范围内
     if !streaming_caps
         .supported_refresh_rates
         .contains(&settings.video.preferred_fps)
@@ -224,6 +250,7 @@ fn try_connect(
         warn!("Chosen refresh rate not supported. Using {fps}Hz");
     }
 
+    // 音频相关的配置
     let game_audio_sample_rate = if let Switch::Enabled(game_audio_desc) = settings.audio.game_audio
     {
         let game_audio_device = AudioDevice::new(
@@ -251,6 +278,7 @@ fn try_connect(
         0
     };
 
+    // 把串流的配置信息发送给client（注意现在还是在try_connect()函数中）
     let client_config = StreamConfigPacket {
         session_desc: {
             let session = SERVER_DATA_MANAGER.read().session().clone();
@@ -264,6 +292,8 @@ fn try_connect(
         .block_on(proto_socket.send(&client_config))
         .map_err(to_int_e!())?;
 
+    // 把原始的proto_socket分成两个，一个用于接收数据，一个用于发送数据
+    // 用来传输控制数据，这里转换为了ControlSocket里面的Sender和Receiver
     let (mut control_sender, control_receiver) = proto_socket.split();
 
     let mut controllers_mode_idx = 0;

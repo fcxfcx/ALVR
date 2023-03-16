@@ -451,6 +451,7 @@ pub unsafe extern "C" fn HmdDriverFactory(
 
         let (frame_interval_sender, frame_interval_receiver) = sync::mpsc::channel();
 
+        // 开启一个线程，用于处理连接
         thread::spawn(move || {
             if set_default_chap {
                 // call this when inside a new tokio thread. Calling this on the parent thread will
