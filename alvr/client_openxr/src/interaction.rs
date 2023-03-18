@@ -1,3 +1,6 @@
+/**
+ * 这个文件里面的应该都是将硬件的xr的接口映射成rust的变量，基本上是手柄之类
+ */
 use crate::{to_pose, to_quat, to_vec3, Platform};
 use alvr_common::{glam::Vec3, *};
 use alvr_events::ButtonValue;
@@ -302,6 +305,7 @@ fn get_button_bindings(platform: Platform) -> HashMap<u64, ButtonBindingInfo> {
     map
 }
 
+// 下面的初始化了这个结构体
 pub struct StreamingInteractionContext {
     pub action_set: xr::ActionSet,
     pub button_actions: HashMap<u64, ButtonAction>,
@@ -309,6 +313,7 @@ pub struct StreamingInteractionContext {
     pub right_hand_source: HandSource,
 }
 
+// 流式交互初始化
 pub fn initialize_streaming_interaction(
     platform: Platform,
     xr_instance: &xr::Instance,

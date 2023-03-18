@@ -255,6 +255,7 @@ pub fn build_client_lib(profile: Profile) {
     cmd!(sh, "cbindgen --output {out}").run().unwrap();
 }
 
+// 这里是构建Android apk的函数
 pub fn build_android_client(profile: Profile) {
     let sh = Shell::new().unwrap();
 
@@ -271,6 +272,7 @@ pub fn build_android_client(profile: Profile) {
 
     const ARTIFACT_NAME: &str = "alvr_client_android";
 
+    // 设置路径
     let target_dir = afs::target_dir();
     let build_dir = afs::build_dir().join(ARTIFACT_NAME);
     sh.create_dir(&build_dir).unwrap();
@@ -308,7 +310,9 @@ pub fn build_android_client(profile: Profile) {
         }
     }
 
+    // 看样子，cargo apk命令是在'alvr\client_core'路径下运行的
     let _push_guard = sh.push_dir(afs::crate_dir("client_openxr"));
+    // 使用 cargo apk工具包，build apk
     cmd!(
         sh,
         "cargo apk build --target-dir={target_dir} {flags_ref...}"
@@ -316,6 +320,7 @@ pub fn build_android_client(profile: Profile) {
     .run()
     .unwrap();
 
+    // 复制build好的apk
     sh.copy_file(
         afs::target_dir()
             .join(profile.to_string())
