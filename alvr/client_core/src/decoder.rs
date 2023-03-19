@@ -31,6 +31,7 @@ pub static DECODER_DEQUEUER: Lazy<Mutex<Option<crate::platform::VideoDecoderDequ
 
 pub static EXTERNAL_DECODER: RelaxedAtomic = RelaxedAtomic::new(false);
 
+// 创建解码器
 pub fn create_decoder(config_nal: Vec<u8>) {
     let config = DECODER_INIT_CONFIG.lock();
 
@@ -91,11 +92,13 @@ pub fn push_nal(timestamp: Duration, nal: &[u8]) {
     }
 }
 
+// 貌似有internal和external两种解码器
 /// Call only with internal decoder (Android only)
 /// If a frame is available, return the timestamp and the AHardwareBuffer.
 pub fn get_frame() -> Option<(Duration, *mut std::ffi::c_void)> {
     #[cfg(target_os = "android")]
     if let Some(decoder) = &mut *DECODER_DEQUEUER.lock() {
+        // dequeue_frame返回了timestamp和buffer
         if let Some((timestamp, buffer_ptr)) = decoder.dequeue_frame() {
             if let Some(stats) = &mut *crate::STATISTICS_MANAGER.lock() {
                 stats.report_compositor_start(timestamp);

@@ -160,11 +160,13 @@ fn main() {
 
         if args.finish().is_empty() {
             match subcommand.as_str() {
+                // 通过这个命令，可以预先准备编译apk所用到的依赖
                 "prepare-deps" => {
                     if let Some(platform) = platform {
                         match platform.as_str() {
                             "windows" => dependencies::prepare_windows_deps(for_ci),
                             "linux" => dependencies::build_ffmpeg_linux(!no_nvidia),
+                            // 根据wiki，编译client需要进到这个命令当中
                             "android" => dependencies::build_android_deps(for_ci),
                             _ => panic!("Unrecognized platform."),
                         }
@@ -181,6 +183,7 @@ fn main() {
                 "build-server" => {
                     build::build_server(profile, gpl, None, false, experiments, keep_config)
                 }
+                // 在这里，xtasks通过传入的build-client参数来build client
                 "build-client" => build::build_android_client(profile),
                 "build-client-lib" => build::build_client_lib(profile),
                 "run-server" => {

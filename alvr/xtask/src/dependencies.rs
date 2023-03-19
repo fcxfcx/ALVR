@@ -286,6 +286,7 @@ fn get_android_openxr_loaders() {
 pub fn build_android_deps(skip_admin_priv: bool) {
     let sh = Shell::new().unwrap();
 
+    // 记得安装llvm，不然报错喽
     if cfg!(windows) && !skip_admin_priv {
         choco_install(&sh, &["unzip", "llvm"]).unwrap();
     }
@@ -297,5 +298,6 @@ pub fn build_android_deps(skip_admin_priv: bool) {
         .run()
         .unwrap();
 
+    // 又进入了另外一个函数，配置openxr的库
     get_android_openxr_loaders();
 }
