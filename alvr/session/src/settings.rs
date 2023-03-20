@@ -262,6 +262,9 @@ pub struct VideoDesc {
     pub rate_control_mode: RateControlMode,
 
     #[schema(advanced)]
+    pub filler_data: bool,
+
+    #[schema(advanced)]
     pub entropy_coding: EntropyCoding,
 
     pub use_10bit_encoder: bool,
@@ -708,6 +711,7 @@ pub fn session_settings_default() -> SettingsDefault {
             rate_control_mode: RateControlModeDefault {
                 variant: RateControlModeDefaultVariant::CBR,
             },
+            filler_data: false,
             entropy_coding: EntropyCodingDefault {
                 variant: EntropyCodingDefaultVariant::CAVLC,
             },
@@ -737,7 +741,7 @@ pub fn session_settings_default() -> SettingsDefault {
                 },
                 max_decoder_latency_ms: 15,
                 decoder_latency_overstep_frames: 15,
-                decoder_latency_overstep_multiplier: 0.95,
+                decoder_latency_overstep_multiplier: 0.99,
             },
             advanced_codec_options: AdvancedCodecOptionsDefault {
                 encoder_quality_preset: EncoderQualityPresetDefault {
