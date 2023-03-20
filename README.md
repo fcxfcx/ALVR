@@ -22,7 +22,8 @@ This is a fork of [ALVR](https://github.com/polygraphene/ALVR).
 
 \* : Available on nightly only  
 \** : Coming soon  
-\*** : Oculus Go support was dropped, the minimum supported OS is Android 8. Download the last compatible version [here](https://github.com/alvr-org/ALVR/releases/tag/v18.2.3).
+\*** : Oculus Go support was dropped, the minimum supported OS is Android 8. 
+Download the last compatible version [here](https://github.com/alvr-org/ALVR/releases/tag/v18.2.3).
 
 |        PC OS        |       Support        |
 | :-----------------: | :------------------: |
