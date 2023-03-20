@@ -135,7 +135,7 @@ pub struct SessionDesc {
 impl Default for SessionDesc {
     fn default() -> Self {
         Self {
-            // 默认构建一个会话描述
+            // 默认构建一个会话描述。。。
             server_version: ALVR_VERSION.clone(),
             setup_wizard: alvr_common::is_stable() || alvr_common::is_nightly(),
             locale: "system".into(),
