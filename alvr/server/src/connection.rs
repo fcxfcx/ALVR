@@ -296,6 +296,7 @@ fn try_connect(
     // 用来传输控制数据，这里转换为了ControlSocket里面的Sender和Receiver
     let (mut control_sender, control_receiver) = proto_socket.split();
 
+    // 从setting里读取配置信息，配置controller参数
     let mut controllers_mode_idx = 0;
     let mut controllers_tracking_system_name = "".into();
     let mut controllers_manufacturer_name = "".into();
@@ -343,6 +344,7 @@ fn try_connect(
         false
     };
 
+    // 配置视野集中渲染参数
     let mut foveation_center_size_x = 0.0;
     let mut foveation_center_size_y = 0.0;
     let mut foveation_center_shift_x = 0.0;
@@ -363,6 +365,7 @@ fn try_connect(
             false
         };
 
+    // 配置色彩校正参数
     let mut brightness = 0.0;
     let mut contrast = 0.0;
     let mut saturation = 0.0;
@@ -382,6 +385,7 @@ fn try_connect(
     let nvenc_overrides = settings.video.advanced_codec_options.nvenc_overrides;
     let amf_controls = settings.video.advanced_codec_options.amf_controls;
 
+    // 配置OpenVR需要的参数
     let new_openvr_config = OpenvrConfig {
         universe_id: settings.headset.universe_id,
         headset_serial_number: settings.headset.serial_number,
@@ -463,6 +467,7 @@ fn try_connect(
         capture_frame_dir: settings.extra.capture_frame_dir,
     };
 
+    // 如果从客户端收到的配置与当前ServerData里的配置不同，则更新配置并重启Driver
     if SERVER_DATA_MANAGER.read().session().openvr_config != new_openvr_config {
         SERVER_DATA_MANAGER.write().session_mut().openvr_config = new_openvr_config;
 
@@ -473,6 +478,7 @@ fn try_connect(
         crate::notify_restart_driver();
     }
 
+    // 连接完毕，存放到已连接的客户端列表中
     CONNECTED_CLIENT_HOSTNAMES
         .lock()
         .insert(client_hostname.clone());
@@ -484,6 +490,7 @@ fn try_connect(
             let client_hostname = client_hostname.clone();
             async move {
                 // this is a bridge between sync and async, skips the needs for a notifier
+                // 搞一个异步任务，每秒检查一次OpenVR Runtime是否还在运行
                 let shutdown_detector = async {
                     while IS_ALIVE.value() {
                         time::sleep(Duration::from_secs(1)).await;
@@ -527,6 +534,7 @@ fn try_connect(
 struct StreamCloseGuard(Arc<RelaxedAtomic>);
 
 impl Drop for StreamCloseGuard {
+    // 负责关闭流
     fn drop(&mut self) {
         self.0.set(false);
 
@@ -552,6 +560,7 @@ impl Drop for StreamCloseGuard {
     }
 }
 
+// 该方法负责开启所有流的处理loop
 async fn connection_pipeline(
     client_hostname: String,
     client_ip: IpAddr,
@@ -563,12 +572,14 @@ async fn connection_pipeline(
 ) -> StrResult {
     let control_sender = Arc::new(Mutex::new(control_sender));
 
+    // 向客户端发送StartStream包，等待客户端回复StreamReady包
     control_sender
         .lock()
         .await
         .send(&ServerControlPacket::StartStream)
         .await?;
 
+    // 需要收到客户端的StreamReady包，才能继续，否则会报错
     match control_receiver.recv().await {
         Ok(ClientControlPacket::StreamReady) => {}
         Ok(_) => {
@@ -581,6 +592,7 @@ async fn connection_pipeline(
 
     let settings = SERVER_DATA_MANAGER.read().settings().clone();
 
+    // 5s内开启StreamSocket，否则报错
     let stream_socket = tokio::select! {
         res = StreamSocketBuilder::connect_to_client(
             client_ip,
@@ -594,26 +606,33 @@ async fn connection_pipeline(
             return fmt_e!("Timeout while setting up streams");
         }
     };
+    // 将StreamSocket包装成Arc，以便在多个线程间共享，注意此时不能再修改StreamSocket的内容
     let stream_socket = Arc::new(stream_socket);
 
+    // 生成负责统计数据的模块
     *STATISTICS_MANAGER.lock() = Some(StatisticsManager::new(
         settings.connection.statistics_history_size as _,
         Duration::from_secs_f32(1.0 / refresh_rate),
     ));
 
+    // 生成负责控制码率的模块
     *BITRATE_MANAGER.lock() = BitrateManager::new(
         settings.video.bitrate,
         settings.connection.statistics_history_size as _,
     );
 
     // todo: dynamic framerate
+    // frame_interval_sender是一个mpsc通道，从server的lib代码里构建并且一层层传进来，同时构建的消费者放在lib代码里
+    // mpsc: multiple producer, single consumer，多个生产者，单个消费者通道
     frame_interval_sender
         .send(Duration::from_secs_f32(1.0 / refresh_rate))
         .ok();
 
+    // 成功连接的标志
     alvr_events::send_event(EventType::ClientConnected);
 
     {
+        // 如果有配置在连接时执行的脚本，则执行
         let on_connect_script = settings.connection.on_connect_script;
 
         if !on_connect_script.is_empty() {
@@ -627,6 +646,7 @@ async fn connection_pipeline(
         }
     }
 
+    // 检查是否开启了录制视频的功能，如果开启了需要保存视频
     if settings.extra.save_video_stream {
         crate::create_recording_file();
     }
@@ -634,12 +654,16 @@ async fn connection_pipeline(
     unsafe { crate::InitializeStreaming() };
 
     let is_streaming = Arc::new(RelaxedAtomic::new(true));
+    // 负责关闭流的guard
     let _stream_guard = StreamCloseGuard(Arc::clone(&is_streaming));
 
+    // 负责音频传输的部分
     let game_audio_loop: BoxFuture<_> = if let Switch::Enabled(desc) = settings.audio.game_audio {
+        // 构造一个新的流，用于传输音频（音频流的id是2）
         let sender = stream_socket.request_stream(AUDIO).await?;
         Box::pin(async move {
             loop {
+                // 新建一个AudioDevice，用于获取音频数据（linux_backend在非linux系统上是None）
                 let device = match AudioDevice::new(
                     Some(settings.audio.linux_backend),
                     &desc.device_id,
@@ -656,6 +680,7 @@ async fn connection_pipeline(
 
                 #[cfg(windows)]
                 unsafe {
+                    // 获取音频设备的id，然后设置到openvr里
                     let device_id = match alvr_audio::get_windows_device_id(&device) {
                         Ok(data) => data,
                         Err(_) => continue,
@@ -706,6 +731,7 @@ async fn connection_pipeline(
     } else {
         Box::pin(future::pending())
     };
+    // 负责麦克风传输的部分
     let microphone_loop: BoxFuture<_> = if let Switch::Enabled(desc) = settings.audio.microphone {
         let input_device = AudioDevice::new(
             Some(settings.audio.linux_backend),
@@ -747,9 +773,12 @@ async fn connection_pipeline(
     };
 
     let video_send_loop = {
+        // VIDEO的流id是3
         let mut socket_sender = stream_socket.request_stream(VIDEO).await?;
         async move {
+            // 开启异步任务，用于从其他线程接收视频数据（还是通过mpsc），然后从socket_sender发送出去
             let (data_sender, mut data_receiver) = tmpsc::unbounded_channel();
+            // 保存data_sender，用于其他线程发送视频数据
             *VIDEO_SENDER.lock() = Some(data_sender);
 
             while let Some(VideoPacket { timestamp, payload }) = data_receiver.recv().await {
@@ -761,10 +790,12 @@ async fn connection_pipeline(
     };
 
     let haptics_send_loop = {
+        // HAPTICS的流id是1
         let mut socket_sender = stream_socket.request_stream(HAPTICS).await?;
         let controllers_desc = settings.headset.controllers.clone();
         async move {
             let (data_sender, mut data_receiver) = tmpsc::unbounded_channel();
+            // 配置HAPTICS的发送器，供其他线程使用
             *HAPTICS_SENDER.lock() = Some(data_sender);
 
             let haptics_manager = controllers_desc
@@ -772,6 +803,7 @@ async fn connection_pipeline(
                 .and_then(|c| c.haptics.into_option())
                 .map(HapticsManager::new);
 
+            // 还是一样，从data_receiver接收数据，然后走socket发送出去
             while let Some(haptics) = data_receiver.recv().await {
                 if settings.extra.log_haptics {
                     alvr_events::send_event(EventType::Haptics(HapticsEvent {
@@ -812,7 +844,9 @@ async fn connection_pipeline(
 
     let tracking_manager = Arc::new(Mutex::new(TrackingManager::new(&settings.headset)));
 
+    // 负责空间位置追踪的部分
     let tracking_receive_loop = {
+        // TRACKING的流id是0
         let mut receiver = stream_socket
             .subscribe_to_stream::<Tracking>(TRACKING)
             .await?;
@@ -886,7 +920,9 @@ async fn connection_pipeline(
         }
     };
 
+    // 负责统计数据的接收和处理
     let statistics_receive_loop = {
+        // STATISTICS的流id是4
         let mut receiver = stream_socket
             .subscribe_to_stream::<ClientStatistics>(STATISTICS)
             .await?;
@@ -1040,7 +1076,9 @@ async fn connection_pipeline(
 
     tokio::select! {
         // Spawn new tasks and let the runtime manage threading
+        // 开启所有的loop任务，有任何一个loop任务结束，就会返回
         res = spawn_cancelable(receive_loop) => {
+            // 如果是接收消息的loop任务结束了，就会发送ClientDisconnected事件
             alvr_events::send_event(EventType::ClientDisconnected);
             if let Err(e) = res {
                 info!("Client disconnected. Cause: {e}" );
