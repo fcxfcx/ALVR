@@ -65,17 +65,26 @@ static WEBSERVER_RUNTIME: Lazy<Mutex<Option<Runtime>>> =
 static WINDOW: Lazy<Mutex<Option<Arc<WindowType>>>> = Lazy::new(|| Mutex::new(None));
 
 static STATISTICS_MANAGER: Lazy<Mutex<Option<StatisticsManager>>> = Lazy::new(|| Mutex::new(None));
+
+// static定义了一个全局静态变量BITRATE_MANAGER，其类型为Lazy<Mutex<BitrateManager>>
+
 static BITRATE_MANAGER: Lazy<Mutex<BitrateManager>> = Lazy::new(|| {
+    // 调用SERVER_DATA_MANAGER的read方法获取读锁
     let data_lock = SERVER_DATA_MANAGER.read();
+    // 创建一个新的互斥锁类型Mutex<BitrateManager>，并使用BitrateManager::new初始化其值
     Mutex::new(BitrateManager::new(
+        // 从data_lock中获取视频比特率设置，并复制到新的实例中
         data_lock.settings().video.bitrate.clone(),
+        // 从data_lock中获取连接统计历史数据的长度，并转换为usize类型，作为新实例的初始化参数
         data_lock.settings().connection.statistics_history_size as usize,
     ))
 });
 
+
+//结构体：视频包
 pub struct VideoPacket {
-    pub timestamp: Duration,
-    pub payload: Vec<u8>,
+    pub timestamp: Duration,    //时间戳
+    pub payload: Vec<u8>,     //有效载荷
 }
 
 static CONTROL_CHANNEL_SENDER: Lazy<Mutex<Option<mpsc::UnboundedSender<ServerControlPacket>>>> =
@@ -401,30 +410,39 @@ pub unsafe extern "C" fn HmdDriverFactory(
         *DECODER_CONFIG.lock() = Some(config_buffer);
     }
 
-    extern "C" fn video_send(timestamp_ns: u64, buffer_ptr: *mut u8, len: i32) {
-        if let Some(sender) = &*VIDEO_SENDER.lock() {
-            let timestamp = Duration::from_nanos(timestamp_ns);
 
+// 用 "C" 语言的方式导出函数
+    extern "C" fn video_send(timestamp_ns: u64, buffer_ptr: *mut u8, len: i32) {
+        // 获取 VIDEO_SENDER 的锁，如果成功获取则执行闭包内的代码
+        if let Some(sender) = &*VIDEO_SENDER.lock() {
+                  // 将传入的纳秒时间戳转换为持续时间
+            let timestamp = Duration::from_nanos(timestamp_ns);
+           
+              // 创建一个长度为 len 的 u8 类型的数组，并将所有元素初始化为 0
             let mut payload = vec![0; len as _];
 
+            
+           // 使用 copy_nonoverlapping（也称为 memcpy）以避免释放由 C++ 分配的内存
+           // 将 buffer_ptr 指向的 len 个字节从 C++ 的内存复制到 Rust 的 payload 向量中
             // use copy_nonoverlapping (aka memcpy) to avoid freeing memory allocated by C++
             unsafe {
                 ptr::copy_nonoverlapping(buffer_ptr, payload.as_mut_ptr(), len as _);
             }
-
+             // 如果 VIDEO_MIRROR_SENDER 的锁获取成功，则将 payload 向量的副本发送到视频镜像发送器中
             if let Some(sender) = &*VIDEO_MIRROR_SENDER.lock() {
                 sender.send(payload.clone()).ok();
             }
-
+            // 如果 VIDEO_RECORDING_FILE 的锁获取成功，则将 payload 向量的内容写入文件中
             if let Some(file) = &mut *VIDEO_RECORDING_FILE.lock() {
                 file.write_all(&payload).ok();
             }
-
+            // 将 timestamp 和 payload 作为参数，构建 VideoPacket 并将其发送到 sender 中
             sender.send(VideoPacket { timestamp, payload }).ok();
-
+             // 如果 STATISTICS_MANAGER 的锁获取成功，则报告视频包的长度
             if let Some(stats) = &mut *STATISTICS_MANAGER.lock() {
                 stats.report_video_packet(len as _);
             }
+            // 获取 BITRATE_MANAGER 的锁，并报告已编码帧的大小和时间戳
             BITRATE_MANAGER
                 .lock()
                 .report_encoded_frame_size(timestamp, len as usize)
@@ -496,8 +514,12 @@ pub unsafe extern "C" fn HmdDriverFactory(
         alvr_common::hash_string(CStr::from_ptr(path).to_str().unwrap())
     }
 
+
+     // extern "C" 它的意思就是告诉编译器将extern “C”后面的括号里的代码当做C代码来处理
     extern "C" fn report_present(timestamp_ns: u64, offset_ns: u64) {
+        // 用 lock 方法获取 STATISTICS_MANAGER 的 MutexGuard，如果获取失败则跳过
         if let Some(stats) = &mut *STATISTICS_MANAGER.lock() {
+            // 调用 MutexGuard 的 report_frame_present 方法，传入 Duration 类型的 timestamp_ns 和 offset_ns
             stats.report_frame_present(
                 Duration::from_nanos(timestamp_ns),
                 Duration::from_nanos(offset_ns),
