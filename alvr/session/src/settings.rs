@@ -7,7 +7,6 @@ include!(concat!(env!("OUT_DIR"), "/openvr_property_keys.rs"));
 #[derive(SettingsSchema, Serialize, Deserialize, Clone)]
 #[serde(rename_all = "camelCase", tag = "type", content = "content")]
 
-
 //声明帧大小的枚举类型
 pub enum FrameSize {
     #[schema(min = 0.25, max = 2., step = 0.01)]
@@ -151,11 +150,11 @@ pub enum BitrateMode {
 #[serde(rename_all = "camelCase")]
 pub struct BitrateConfig {
     pub mode: BitrateMode,
-      
+
     //重新设置帧率的阈值
     #[schema(advanced, min = 0.01, max = 2.0, step = 0.01)]
     pub framerate_reset_threshold_multiplier: f32,
-    
+
     //最大网络延迟
     #[schema(advanced, min = 1, max = 50, step = 1)]
     pub max_network_latency_ms: Switch<u64>,
@@ -251,7 +250,7 @@ pub struct VideoDesc {
     #[schema(placeholder = "resolution_dropdown")]
     //
     #[schema(advanced)]
-    pub render_resolution: FrameSize,   //渲染分辨率
+    pub render_resolution: FrameSize, //渲染分辨率
 
     #[schema(advanced)]
     pub recommended_target_resolution: FrameSize, //推荐的目标分辨率
@@ -259,29 +258,29 @@ pub struct VideoDesc {
     #[schema(placeholder = "display_refresh_rate")]
     //
     #[schema(advanced)]
-    pub preferred_fps: f32,        //偏好的帧率
+    pub preferred_fps: f32, //偏好的帧率
 
     #[schema(advanced, min = 1., max = 10.0, step = 0.1)]
-    pub max_buffering_frames: f32,   //最大缓冲帧
+    pub max_buffering_frames: f32, //最大缓冲帧
 
     #[schema(advanced, min = 0.50, max = 0.99, step = 0.01)]
-    pub buffering_history_weight: f32,  //缓冲历史权重
+    pub buffering_history_weight: f32, //缓冲历史权重
 
-    pub codec: CodecType,   //编码类型
-
-    #[schema(advanced)]
-    pub rate_control_mode: RateControlMode,    //码率控制模式
+    pub codec: CodecType, //编码类型
 
     #[schema(advanced)]
-    pub filler_data: bool,    //
+    pub rate_control_mode: RateControlMode, //码率控制模式
 
     #[schema(advanced)]
-    pub entropy_coding: EntropyCoding,  //熵编码
-
-    pub use_10bit_encoder: bool,    //使用10bit的编码器
+    pub filler_data: bool, //
 
     #[schema(advanced)]
-    pub force_sw_encoding: bool,     //
+    pub entropy_coding: EntropyCoding, //熵编码
+
+    pub use_10bit_encoder: bool, //使用10bit的编码器
+
+    #[schema(advanced)]
+    pub force_sw_encoding: bool, //
 
     #[schema(advanced)]
     pub sw_thread_count: u32,
@@ -289,14 +288,14 @@ pub struct VideoDesc {
     pub bitrate: BitrateConfig, //比特率配置
 
     #[schema(advanced)]
-    pub advanced_codec_options: AdvancedCodecOptions,   //高级编码选择
+    pub advanced_codec_options: AdvancedCodecOptions, //高级编码选择
 
     #[schema(advanced)]
-    pub seconds_from_vsync_to_photons: f32,   
+    pub seconds_from_vsync_to_photons: f32,
 
-    pub foveated_rendering: Switch<FoveatedRenderingDesc>,   //注释点渲染
+    pub foveated_rendering: Switch<FoveatedRenderingDesc>, //注释点渲染
     pub oculus_foveation_level: OculusFovetionLevel,
-    pub dynamic_oculus_foveation: bool,      
+    pub dynamic_oculus_foveation: bool,
     pub color_correction: Switch<ColorCorrectionDesc>,
 }
 
@@ -744,7 +743,7 @@ pub fn session_settings_default() -> SettingsDefault {
                         },
                         min_bitrate_mbps: SwitchDefault {
                             enabled: false,
-                            content: 5,  //最小比特率
+                            content: 5, //最小比特率
                         },
                     },
                     //可变化的
@@ -753,10 +752,11 @@ pub fn session_settings_default() -> SettingsDefault {
                 framerate_reset_threshold_multiplier: 0.30, //帧率重新设置的阈值倍数
                 max_network_latency_ms: SwitchDefault {
                     enabled: false,
-                    content: 8,    //最大网络延迟
+                    content: 8, //最大网络延迟
                 },
-                max_decoder_latency_ms: 15,   ///最大解码延迟
-                decoder_latency_overstep_frames: 15,   //解码延迟超过设定的帧（15）
+                max_decoder_latency_ms: 15,
+                ///最大解码延迟
+                decoder_latency_overstep_frames: 15, //解码延迟超过设定的帧（15）
                 decoder_latency_overstep_multiplier: 0.99, //解码延迟超过设定的倍数（0.99）
             },
             advanced_codec_options: AdvancedCodecOptionsDefault {

@@ -10,12 +10,12 @@ const FULL_REPORT_INTERVAL: Duration = Duration::from_millis(500);
 
 //结构体：历史帧
 pub struct HistoryFrame {
-    target_timestamp: Duration,   //目标时间戳
-    tracking_received: Instant,   //帧接收时间
-    frame_present: Instant,      //帧呈现时间
-    frame_composed: Instant,     //帧组成时间
-    frame_encoded: Instant,      //帧编码时间
-    total_pipeline_latency: Duration,    //总流程延迟时间
+    target_timestamp: Duration,       //目标时间戳
+    tracking_received: Instant,       //帧接收时间
+    frame_present: Instant,           //帧呈现时间
+    frame_composed: Instant,          //帧组成时间
+    frame_encoded: Instant,           //帧编码时间
+    total_pipeline_latency: Duration, //总流程延迟时间
 }
 
 impl Default for HistoryFrame {
@@ -23,56 +23,56 @@ impl Default for HistoryFrame {
     fn default() -> Self {
         let now = Instant::now(); //获取当前时间
         Self {
-            target_timestamp: Duration::ZERO,   //目标时间戳，初始化为0
-            tracking_received: now,      //接受时间，初始化为当前时间
-            frame_present: now,          // 帧呈现时间，初始化为当前时间
-            frame_composed: now,         // 帧合成时间，初始化为当前时间
-            frame_encoded: now,          // 帧编码时间，初始化为当前时间
-            total_pipeline_latency: Duration::ZERO,   // 总延迟，初始化为 0
+            target_timestamp: Duration::ZERO,       //目标时间戳，初始化为0
+            tracking_received: now,                 //接受时间，初始化为当前时间
+            frame_present: now,                     // 帧呈现时间，初始化为当前时间
+            frame_composed: now,                    // 帧合成时间，初始化为当前时间
+            frame_encoded: now,                     // 帧编码时间，初始化为当前时间
+            total_pipeline_latency: Duration::ZERO, // 总延迟，初始化为 0
         }
     }
 }
 
 pub struct StatisticsManager {
-    history_buffer: VecDeque<HistoryFrame>,   // 历史帧缓冲区，用于记录历史帧的信息
+    history_buffer: VecDeque<HistoryFrame>, // 历史帧缓冲区，用于记录历史帧的信息
     max_history_size: usize,                // 最大历史帧缓存大小
-    nominal_server_frame_interval: Duration,   // 服务器每帧的时长
-    last_full_report_instant: Instant,       // 上一次完整的报告时间
-    last_frame_present_instant: Instant,     // 上一帧图像呈现时间
-    last_frame_present_interval: Duration,     // 上一帧图像呈现间隔时长
-    video_packets_total: usize,                 // 视频数据包总数
-    video_packets_partial_sum: usize,           //视频数据包部分求和
-    video_bytes_total: usize,                   //视频数据总字节数
-    video_bytes_partial_sum: usize,            //视频数据部分字节求和
-    packets_lost_total: usize,                  //丢包总数
-    packets_lost_partial_sum: usize,               //丢包部分求和
-    battery_gauges: HashMap<u64, f32>,          //电池电量表，用于存储设备ID和对应的电量值        
-    game_render_latency_average: SlidingWindowAverage<Duration>,   // 游戏渲染延迟平均值，使用滑动窗口进行计算
+    nominal_server_frame_interval: Duration, // 服务器每帧的时长
+    last_full_report_instant: Instant,      // 上一次完整的报告时间
+    last_frame_present_instant: Instant,    // 上一帧图像呈现时间
+    last_frame_present_interval: Duration,  // 上一帧图像呈现间隔时长
+    video_packets_total: usize,             // 视频数据包总数
+    video_packets_partial_sum: usize,       //视频数据包部分求和
+    video_bytes_total: usize,               //视频数据总字节数
+    video_bytes_partial_sum: usize,         //视频数据部分字节求和
+    packets_lost_total: usize,              //丢包总数
+    packets_lost_partial_sum: usize,        //丢包部分求和
+    battery_gauges: HashMap<u64, f32>,      //电池电量表，用于存储设备ID和对应的电量值
+    game_render_latency_average: SlidingWindowAverage<Duration>, // 游戏渲染延迟平均值，使用滑动窗口进行计算
 }
 
 impl StatisticsManager {
     // history size used to calculate average total pipeline latency
     pub fn new(history_size: usize, nominal_server_frame_interval: Duration) -> Self {
         Self {
-            history_buffer: VecDeque::new(),    // 历史帧缓冲区，用于记录历史帧的信息
-            max_history_size: history_size,     // 最大历史帧缓存大小
-            nominal_server_frame_interval,      // 服务器每帧的时长
-            last_full_report_instant: Instant::now(),   // 上一次完整的报告时间
-            last_frame_present_instant: Instant::now(),  // 上一帧图像呈现时间
-            last_frame_present_interval: Duration::ZERO,  // 上一帧图像呈现间隔时长
-            video_packets_total: 0,                      // 视频数据包总数
-            video_packets_partial_sum: 0,                //视频数据包部分求和
-            video_bytes_total: 0,                      //视频数据总字节数
-            video_bytes_partial_sum: 0,                 //视频数据部分字节求和
-            packets_lost_total: 0,                      //丢包总数
-            packets_lost_partial_sum: 0,               //丢包部分求和
-            battery_gauges: HashMap::new(),    //电池电量表，用于存储设备ID和对应的电量值          
-            game_render_latency_average: SlidingWindowAverage::new(Duration::ZERO, history_size),   // 游戏渲染延迟平均值，使用滑动窗口进行计算
+            history_buffer: VecDeque::new(), // 历史帧缓冲区，用于记录历史帧的信息
+            max_history_size: history_size,  // 最大历史帧缓存大小
+            nominal_server_frame_interval,   // 服务器每帧的时长
+            last_full_report_instant: Instant::now(), // 上一次完整的报告时间
+            last_frame_present_instant: Instant::now(), // 上一帧图像呈现时间
+            last_frame_present_interval: Duration::ZERO, // 上一帧图像呈现间隔时长
+            video_packets_total: 0,          // 视频数据包总数
+            video_packets_partial_sum: 0,    //视频数据包部分求和
+            video_bytes_total: 0,            //视频数据总字节数
+            video_bytes_partial_sum: 0,      //视频数据部分字节求和
+            packets_lost_total: 0,           //丢包总数
+            packets_lost_partial_sum: 0,     //丢包部分求和
+            battery_gauges: HashMap::new(),  //电池电量表，用于存储设备ID和对应的电量值
+            game_render_latency_average: SlidingWindowAverage::new(Duration::ZERO, history_size), // 游戏渲染延迟平均值，使用滑动窗口进行计算
         }
     }
 
     pub fn report_tracking_received(&mut self, target_timestamp: Duration) {
-         // 如果历史缓存中没有该时间戳的帧，则执行以下操作
+        // 如果历史缓存中没有该时间戳的帧，则执行以下操作
         if !self
             .history_buffer
             .iter()
@@ -106,7 +106,6 @@ impl StatisticsManager {
             // 更新上一帧呈现时间为当前时间
             self.last_frame_present_instant = now;
             // 记录当前帧呈现时间
-
             frame.frame_present = now;
         }
     }
@@ -135,7 +134,7 @@ impl StatisticsManager {
     }
 
     pub fn report_video_packet(&mut self, bytes_count: usize) {
-        self.video_packets_total += 1;    
+        self.video_packets_total += 1;
         self.video_packets_partial_sum += 1;
         self.video_bytes_total += bytes_count;
         self.video_bytes_partial_sum += bytes_count;
@@ -155,7 +154,7 @@ impl StatisticsManager {
     //定义一个公共函数，输入参数为可变的self引用和客户端统计信息client_stats，并返回一个时间间隔Duration
     pub fn report_statistics(&mut self, client_stats: ClientStatistics) -> Duration {
         //如果可变的history_buffer迭代器中的一个frame.target_timestamp等于client_stats.target_timestamp，
-       //则将该frame的total_pipeline_latency属性更新为client_stats的total_pipeline_latency属性，
+        //则将该frame的total_pipeline_latency属性更新为client_stats的total_pipeline_latency属性，
         if let Some(frame) = self
             .history_buffer
             .iter_mut()
@@ -163,7 +162,7 @@ impl StatisticsManager {
         {
             //并计算出网络延迟、客户端帧率和服务器帧率等统计信息
             frame.total_pipeline_latency = client_stats.total_pipeline_latency;
-             //计算出游戏渲染延迟时间
+            //计算出游戏渲染延迟时间
             let game_time_latency = frame
                 .frame_present
                 .saturating_duration_since(frame.tracking_received);
@@ -171,8 +170,8 @@ impl StatisticsManager {
             //将游戏渲染延迟时间加入游戏渲染延迟时间平均值的样本中
             self.game_render_latency_average
                 .submit_sample(game_time_latency);
-            
-             //计算出服务器合成延迟时间
+
+            //计算出服务器合成延迟时间
             let server_compositor_latency = frame
                 .frame_composed
                 .saturating_duration_since(frame.frame_present);
@@ -200,7 +199,7 @@ impl StatisticsManager {
                     + client_stats.rendering
                     + client_stats.vsync_queue,
             );
-             //计算出客户端帧率和服务器帧率
+            //计算出客户端帧率和服务器帧率
             let client_fps = 1.0
                 / client_stats
                     .frame_interval
@@ -212,7 +211,7 @@ impl StatisticsManager {
                     .max(Duration::from_millis(1))
                     .as_secs_f32();
             //如果距离上一次完整报告时间间隔已经超过FULL_REPORT_INTERVAL，则发送EventType::Statistics类型的事件，
-         //包含视频包数、每秒视频包数、视频总字节数、每秒视频比特率、总延迟时间、网络延迟时间、编码延迟时间、
+            //包含视频包数、每秒视频包数、视频总字节数、每秒视频比特率、总延迟时间、网络延迟时间、编码延迟时间、
             //解码延迟时间、视频包丢失总数、每秒视频包丢失数、客户端帧率、服务器帧率以及头盔
             if self.last_full_report_instant + FULL_REPORT_INTERVAL < Instant::now() {
                 self.last_full_report_instant += FULL_REPORT_INTERVAL;
