@@ -56,6 +56,7 @@ struct StreamingInputState {
     last_right_hand_position: Vec3,
 }
 
+// 这个EglContext结构应该是对于egl的一个重新封装，egl是opengl与底层原生平台窗口系统之间的接口
 #[allow(unused)]
 struct EglContext {
     instance: egl::DynamicInstance<EGL1_4>,
@@ -93,6 +94,7 @@ fn to_xr_time(timestamp: Duration) -> xr::Time {
     xr::Time::from_nanos(timestamp.as_nanos() as _)
 }
 
+// 初始化egl
 #[allow(unused_variables)]
 fn init_egl() -> EglContext {
     let instance = unsafe { egl::DynamicInstance::<EGL1_4>::load_required().unwrap() };
@@ -221,6 +223,7 @@ fn update_streaming_input(
 
     let now = xr_runtime_now(&ctx.xr_instance, ctx.platform).ok_or_else(enone!())?;
 
+    // 头部预测？？
     let target_timestamp = now + alvr_client_core::get_head_prediction_offset();
 
     let (view_flags, views) = ctx
@@ -581,6 +584,7 @@ pub fn entry_point() {
                     ClientCoreEvent::UpdateHudMessage(message) => {
                         alvr_client_core::opengl::update_hud_message(&message);
                     }
+                    // 推流开始？？？
                     ClientCoreEvent::StreamingStarted {
                         view_resolution,
                         fps,
@@ -719,6 +723,7 @@ pub fn entry_point() {
                 continue;
             }
 
+            // 什么是swapchain呢？https://en.wikipedia.org/wiki/Swap_chain
             let swapchains = if let Some(swapchains) = &mut stream_swapchains {
                 swapchains
             } else {
@@ -741,6 +746,7 @@ pub fn entry_point() {
                     );
                 let mut frame_result = None;
                 while frame_result.is_none() && Instant::now() < frame_poll_deadline {
+                    // 通过这个方法请求了帧
                     frame_result = alvr_client_core::get_frame();
                     thread::yield_now();
                 }
@@ -765,7 +771,8 @@ pub fn entry_point() {
                 } else {
                     last_good_views.clone()
                 };
-
+                
+                // 渲染流
                 alvr_client_core::opengl::render_stream(
                     hardware_buffer,
                     [left_swapchain_idx, right_swapchain_idx],
@@ -875,17 +882,20 @@ fn xr_runtime_now(xr_instance: &xr::Instance, platform: Platform) -> Option<Dura
     (time_nanos > 0).then(|| Duration::from_nanos(time_nanos as _))
 }
 
+// 这个就是app的入口函数
 #[cfg(target_os = "android")]
 #[no_mangle]
 fn android_main(app: android_activity::AndroidApp) {
     use android_activity::{InputStatus, MainEvent, PollEvent};
 
+    // 开了一个进程负责渲染
     let rendering_thread = thread::spawn(|| {
         // workaround for the Pico runtime
         let context = ndk_context::android_context();
         let vm = unsafe { jni::JavaVM::from_raw(context.vm().cast()) }.unwrap();
         let _env = vm.attach_current_thread().unwrap();
 
+        // 这个函数应该初始化了各种需要的东西
         entry_point();
     });
 

@@ -1,6 +1,6 @@
 mod average;
 mod logging;
-mod paths;
+pub mod paths;
 mod primitives;
 mod version;
 

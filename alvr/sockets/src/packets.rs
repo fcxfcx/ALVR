@@ -14,13 +14,14 @@ pub const STATISTICS: u16 = 4;
 
 #[derive(Serialize, Deserialize, Clone)]
 pub struct VideoStreamingCapabilities {
-    pub default_view_resolution: UVec2,
-    pub supported_refresh_rates: Vec<f32>,
-    pub microphone_sample_rate: u32,
+    pub default_view_resolution: UVec2,    //默认分辨率
+    pub supported_refresh_rates: Vec<f32>, //支持的刷新率
+    pub microphone_sample_rate: u32,       //麦克风采样率
 }
 
 #[derive(Serialize, Deserialize)]
 pub enum ClientConnectionResult {
+    // 客户端连接的结果，分为接受和待机
     ConnectionAccepted {
         display_name: String,
         server_ip: IpAddr,
@@ -31,6 +32,7 @@ pub enum ClientConnectionResult {
 
 #[derive(Serialize, Deserialize)]
 pub struct StreamConfigPacket {
+    // 数据流配置包，包括会话描述，分辨率，帧率，采样率
     pub session_desc: String, // transfer session as string to allow for extrapolation
     pub view_resolution: UVec2,
     pub fps: f32,
@@ -39,6 +41,7 @@ pub struct StreamConfigPacket {
 
 #[derive(Serialize, Deserialize)]
 pub enum ServerControlPacket {
+    // 用于表示服务器控制的数据包，列出了一些包类型
     StartStream,
     InitializeDecoder { config_buffer: Vec<u8> },
     Restarting,
@@ -51,19 +54,20 @@ pub enum ServerControlPacket {
 #[derive(Serialize, Deserialize, Clone)]
 pub struct ViewsConfig {
     // Note: the head-to-eye transform is always a translation along the x axis
-    pub ipd_m: f32,
-    pub fov: [Fov; 2],
+    pub ipd_m: f32,    // 瞳距
+    pub fov: [Fov; 2], // 视场角
 }
 
 #[derive(Serialize, Deserialize, Clone)]
 pub struct BatteryPacket {
-    pub device_id: u64,
-    pub gauge_value: f32, // range [0, 1]
-    pub is_plugged: bool,
+    pub device_id: u64,   // 电池设备id
+    pub gauge_value: f32, // 电量，range [0, 1]
+    pub is_plugged: bool, // 是否充电
 }
 
 #[derive(Serialize, Deserialize)]
 pub enum ClientControlPacket {
+    // 客户端控制包，包括一些包类型
     PlayspaceSync(Option<Vec2>),
     RequestIdr,
     KeepAlive,
@@ -89,31 +93,31 @@ pub enum ClientControlPacket {
 
 #[derive(Serialize, Deserialize, Clone, Copy, Default, Debug)]
 pub struct Pose {
-    pub orientation: Quat,
-    pub position: Vec3,
+    pub orientation: Quat, //空间位置 -- 旋转
+    pub position: Vec3,    //空间位置 -- 位移
 }
 
 #[derive(Serialize, Deserialize, Clone, Copy, Default, Debug)]
 pub struct DeviceMotion {
-    pub pose: Pose,
-    pub linear_velocity: Vec3,
-    pub angular_velocity: Vec3,
+    pub pose: Pose,             // 姿态信息 -- 位置（旋转+位移）
+    pub linear_velocity: Vec3,  // 姿态信息 -- 线速度
+    pub angular_velocity: Vec3, // 姿态信息 -- 角速度
 }
 
 #[derive(Serialize, Deserialize)]
 pub struct Tracking {
-    pub target_timestamp: Duration,
-    pub device_motions: Vec<(u64, DeviceMotion)>,
-    pub left_hand_skeleton: Option<[Pose; 26]>,
-    pub right_hand_skeleton: Option<[Pose; 26]>,
+    pub target_timestamp: Duration,               // 追踪信息--目标时间戳
+    pub device_motions: Vec<(u64, DeviceMotion)>, // 追踪信息--设备运动
+    pub left_hand_skeleton: Option<[Pose; 26]>,   // 追踪信息--左手骨架
+    pub right_hand_skeleton: Option<[Pose; 26]>,  // 追踪信息--右手骨架
 }
 
 #[derive(Serialize, Deserialize)]
 pub struct Haptics {
-    pub device_id: u64,
-    pub duration: Duration,
-    pub frequency: f32,
-    pub amplitude: f32,
+    pub device_id: u64,     // 触觉信息--设备id
+    pub duration: Duration, // 触觉信息--持续时间
+    pub frequency: f32,     // 触觉信息--频率
+    pub amplitude: f32,     // 触觉信息--振幅
 }
 
 #[derive(Serialize, Deserialize)]
@@ -123,6 +127,7 @@ pub struct AudioDevicesList {
 }
 
 pub enum GpuVendor {
+    // GPU厂商
     Nvidia,
     Amd,
     Other,
@@ -136,6 +141,7 @@ pub enum PathSegment {
 
 #[derive(Serialize, Deserialize, Clone)]
 pub enum ClientListAction {
+    // 客户端列表的可用操作
     AddIfMissing,
     SetDisplayName(String),
     Trust,
@@ -147,6 +153,7 @@ pub enum ClientListAction {
 
 #[derive(Serialize, Deserialize, Default, Clone)]
 pub struct ClientStatistics {
+    // 客户端统计信息
     pub target_timestamp: Duration, // identifies the frame
     pub frame_interval: Duration,
     pub video_decode: Duration,

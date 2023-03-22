@@ -13,6 +13,7 @@ use std::{
 
 // SessionSettings is similar to Settings but it contains every branch, even unused ones. This is
 // the settings representation that the UI uses.
+// 在同一crate下的settings.rs里面也有配置，但是这个包括了它，这个是UI用的
 pub type SessionSettings = settings::SettingsDefault;
 
 // This structure is used to store the minimum configuration data that ALVR driver needs to
@@ -25,6 +26,7 @@ pub type SessionSettings = settings::SettingsDefault;
 // UpdateForStream.
 #[derive(Serialize, Deserialize, PartialEq, Default, Clone, Debug)]
 pub struct OpenvrConfig {
+    // 所有关于OpenVR的配置都在这里
     pub universe_id: u64,
     pub headset_serial_number: String,
     pub headset_tracking_system_name: String,
@@ -109,30 +111,31 @@ pub struct OpenvrConfig {
 #[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(rename_all = "camelCase")]
 pub struct ClientConnectionDesc {
-    pub display_name: String,
-    pub current_ip: Option<IpAddr>,
-    pub manual_ips: HashSet<IpAddr>,
-    pub trusted: bool,
+    pub display_name: String,        // 用户连接描述 -- 客户端名称
+    pub current_ip: Option<IpAddr>,  // 用户连接描述 -- 客户端IP
+    pub manual_ips: HashSet<IpAddr>, // 用户连接描述 -- 手动输入的用户列表
+    pub trusted: bool,               // 用户连接描述 -- 是否信任
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(rename_all = "camelCase")]
 pub struct SessionDesc {
-    pub server_version: Version,
-    pub setup_wizard: bool,
+    pub server_version: Version, // 连接会话描述 -- 服务器版本
+    pub setup_wizard: bool,      // 连接会话描述 -- 是否显示安装向导
     pub locale: String,
 
     #[serde(rename = "openvr_config")]
-    pub openvr_config: OpenvrConfig,
+    pub openvr_config: OpenvrConfig, // 连接会话描述 -- OpenVR配置
     // The hashmap key is the hostname
-    pub client_connections: HashMap<String, ClientConnectionDesc>,
-    pub session_settings: SessionSettings,
+    pub client_connections: HashMap<String, ClientConnectionDesc>, // 连接会话描述 -- 客户端连接列表
+    pub session_settings: SessionSettings, // 连接会话描述 -- 会话设置(在setting)
     pub advanced: bool,
 }
 
 impl Default for SessionDesc {
     fn default() -> Self {
         Self {
+            // 默认构建一个会话描述。。。
             server_version: ALVR_VERSION.clone(),
             setup_wizard: alvr_common::is_stable() || alvr_common::is_nightly(),
             locale: "system".into(),
@@ -176,21 +179,28 @@ impl SessionDesc {
     // deserialization will fail if the type of values does not match. Because of this,
     // `session_settings` must be handled separately to do a better job of retrieving data using the
     // settings schema.
+    // 如果 json_value 不是一个有效的 SessionDesc 表示（因为版本升级），则使用一些模糊逻辑来尽可能多地推断信息。
+    // 由于 SessionDesc 不能有一个模板（因为 SessionSettings 也需要有一个模式，但它是由我们无法控制的方式生成的）
+    // 我只对字段做基本的名称检查，如果值的类型不匹配，反序列化将失败。因此，`session_settings` 必须单独处理，以便使用设置模式更好地检索数据。
     pub fn merge_from_json(&mut self, json_value: &json::Value) -> StrResult {
         const SESSION_SETTINGS_STR: &str = "sessionSettings";
 
+        // 尝试从json格式读取新的会话描述，如果正常读取了，直接返回
         if let Ok(session_desc) = json::from_value(json_value.clone()) {
             *self = session_desc;
             return Ok(());
         }
 
+        // 否则，用json格式储存旧的会话描述
         let old_session_json = json::to_value(&self).map_err(err!())?;
         let old_session_fields = old_session_json.as_object().ok_or_else(enone!())?;
 
+        // 最大程度推测新的会话描述
         let maybe_session_settings_json =
             json_value
                 .get(SESSION_SETTINGS_STR)
                 .map(|new_session_settings_json| {
+                    // 利用旧的会话描述中的sessionSettings字段和新的会话描述中的sessionSettings字段，推测新的sessionSettings字段
                     extrapolate_session_settings_from_session_settings(
                         &old_session_json[SESSION_SETTINGS_STR],
                         new_session_settings_json,
@@ -198,10 +208,12 @@ impl SessionDesc {
                     )
                 });
 
+        // 如果有新的字段，除非是sessionSettings字段，否则用新的字段替换旧的字段
         let new_fields = old_session_fields
             .iter()
             .map(|(name, json_field_value)| {
                 let new_json_field_value = if name == SESSION_SETTINGS_STR {
+                    // 对于sessionSettings字段，新建一个默认的sessionSettings字段
                     json::to_value(settings::session_settings_default()).unwrap()
                 } else {
                     json_value.get(name).unwrap_or(json_field_value).clone()
@@ -215,6 +227,7 @@ impl SessionDesc {
 
         match json::from_value::<SessionSettings>(maybe_session_settings_json.ok_or_else(enone!())?)
         {
+            // 如果sessionSettings字段正常读取，会添加到session_desc_mut中
             Ok(session_settings) => {
                 session_desc_mut.session_settings = session_settings;
                 *self = session_desc_mut;

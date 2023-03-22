@@ -347,6 +347,7 @@ impl Drop for VideoDecoderDequeuer {
 
 // Create a enqueuer/dequeuer pair. To preserve the state of internal variables, use
 // `enqueuer.recreate_decoder()` instead of dropping the pair and calling this function again.
+// 这个函数似乎与decoder关联很大，需要关注
 pub fn video_decoder_split(
     config: DecoderInitConfig,
     csd_0: Vec<u8>,

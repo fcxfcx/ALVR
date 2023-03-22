@@ -52,9 +52,12 @@ pub async fn connect(
     port: u16,
 ) -> StrResult<(UdpStreamSendSocket, UdpStreamReceiveSocket)> {
     let peer_addr = (peer_ip, port).into();
+    // 使用UdpFrame，让socket可以发送和接收固定长度的数据（对应TCP里使用的Framed）
     let socket = UdpFramed::new(socket, Ldc::new());
     let (send_socket, receive_socket) = socket.split();
 
+    // 封装addr的原因是UdpFramed本身不支持直接连接到peer，只能通过send和recv来指定目标地址
+    // 但是我们需要addr来判断数据包是否来自目标设备
     Ok((
         UdpStreamSendSocket {
             peer_addr,
@@ -74,10 +77,12 @@ pub async fn receive_loop(
     while let Some(maybe_packet) = socket.inner.next().await {
         let (mut packet_bytes, address) = maybe_packet.map_err(err!())?;
 
+        // 不接收非目标设备的数据
         if address != socket.peer_addr {
             continue;
         }
 
+        // socket收到一个包后解析流索引，然后根据id找到对应的UnboundedSender，通过它发送包数据（这个数据会被StreamReceiver处理）
         let stream_id = packet_bytes.get_u16();
         if let Some(enqueuer) = packet_enqueuers.lock().await.get_mut(&stream_id) {
             enqueuer.send(packet_bytes).map_err(err!())?;

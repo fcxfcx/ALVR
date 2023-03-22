@@ -43,6 +43,7 @@ impl ALVRLauncher {
 
 fn launcher_lifecycle(state: Arc<Mutex<State>>) {
     loop {
+        // 第一个循环检查SteamVR是否安装，如果没有安装则一直循环检查，直到可以正常打开完成
         let steamvr_ok = commands::check_steamvr_installation();
 
         if steamvr_ok {
@@ -59,6 +60,7 @@ fn launcher_lifecycle(state: Arc<Mutex<State>>) {
         }
     }
 
+    // 脱离resetting状态
     state.lock().unwrap().view = View::Launching { resetting: false };
 
     let request_agent = ureq::AgentBuilder::new()
@@ -71,6 +73,7 @@ fn launcher_lifecycle(state: Arc<Mutex<State>>) {
         let maybe_response = request_agent.get("http://127.0.0.1:8082/index.html").call();
         if let Ok(response) = maybe_response {
             if response.status() == 200 {
+                // 当确认可以打开ALVR Dashboard时，退出Launcher
                 std::process::exit(0);
             }
         }
@@ -171,7 +174,8 @@ fn make_window() -> StrResult {
                 ..Default::default()
             },
             Box::new(|cc| Box::new(ALVRLauncher::new(cc, state))),
-        );
+        )
+        .unwrap_or(println!("eframe::run_native failed"));
     }
     Ok(())
 }

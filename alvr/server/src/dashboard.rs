@@ -38,6 +38,7 @@ pub fn ui_thread() -> StrResult {
     const WINDOW_WIDTH: u32 = 800;
     const WINDOW_HEIGHT: u32 = 600;
 
+    // 居中显示
     let (pos_left, pos_top) = if let Ok((screen_width, screen_height)) = get_screen_size() {
         (
             (screen_width - WINDOW_WIDTH) / 2,
@@ -47,10 +48,12 @@ pub fn ui_thread() -> StrResult {
         (0, 0)
     };
 
+    // 创建一个临时目录，用于存放Alcro的用户数据
     let temp_dir = tempfile::TempDir::new().map_err(err!())?;
     let user_data_dir = temp_dir.path();
     fs::File::create(temp_dir.path().join("FirstLaunchAfterInstallation")).map_err(err!())?;
 
+    // 启动Alcro，生成窗口，窗口内容是SERVER_URL地址的网页
     let window = alcro::UIBuilder::new()
         .content(alcro::Content::Url(SERVER_URL))
         .user_data_dir(user_data_dir)
