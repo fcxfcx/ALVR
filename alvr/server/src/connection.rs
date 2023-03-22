@@ -572,6 +572,11 @@ async fn connection_pipeline(
         Duration::from_secs_f32(1.0 / refresh_rate),
     ));
 
+// 获取BITRATE_MANAGER的锁，并使用settings.video.bitrate和settings.connection.statistics_history_size作为参数来创建一个新的BitrateManager实例
+// 在修改BITRATE_MANAGER实例之前，通过lock()方法获得了对它的锁定，以防止多个线程并发访问。
+// BitrateManager的new方法有两个参数：所需的比特率和统计历史记录的大小。
+// statistics_history_size字段被转换为usize类型，因为new方法的第二个参数是usize类型。
+
     *BITRATE_MANAGER.lock() = BitrateManager::new(
         settings.video.bitrate,
         settings.connection.statistics_history_size as _,
@@ -857,19 +862,28 @@ async fn connection_pipeline(
         }
     };
 
+    // 定义名为 `statistics_receive_loop` 的闭包，用于处理接收到的 `ClientStatistics` 数据流
     let statistics_receive_loop = {
+        // 创建一个异步的 `receiver`，用于订阅 `STATISTICS` 通道上的 `ClientStatistics` 数据流
+        // 并将结果赋值给 receiver 变量。若出错则返回错误并退出闭包
         let mut receiver = stream_socket
             .subscribe_to_stream::<ClientStatistics>(STATISTICS)
-            .await?;
+            .await?; // `await` 等待异步操作完成并返回结果
+        // 创建一个异步闭包并返回，此闭包用于不断循环，从 receiver 中读取数据
         async move {
             loop {
+                // 使用 recv_header_only 方法从 receiver 中读取一条 ClientStatistics 数据
+                 // 若出错则返回错误并退出闭包
                 let client_stats = receiver.recv_header_only().await?;
-
+                  // 检查 `STATISTICS_MANAGER` 中是否存在数据，若存在则进入语句块
                 if let Some(stats) = &mut *STATISTICS_MANAGER.lock() {
+                    // 从 `client_stats` 中获取目标时间戳和视频解码延迟信息
                     let timestamp = client_stats.target_timestamp;
                     let decoder_latency = client_stats.video_decode;
+                    // 将 `client_stats` 的信息传递给 `STATISTICS_MANAGER` 并获取网络延迟
                     let network_latency = stats.report_statistics(client_stats);
 
+                    // 将时间戳、网络延迟和解码延迟信息传递给 `BITRATE_MANAGER` 进行处理
                     BITRATE_MANAGER.lock().report_frame_latencies(
                         timestamp,
                         network_latency,
