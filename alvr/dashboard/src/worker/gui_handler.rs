@@ -10,13 +10,19 @@ pub async fn handle_msg(
     tx1: &std::sync::mpsc::Sender<WorkerMsg>,
 ) -> reqwest::Result<bool> {
     Ok(match msg {
+        // 对应的api接口参考server/src/web_server.rs
+        // 退出
         GuiMsg::Quit => true,
+
+        // 获取会话设置
         GuiMsg::GetSession => {
+            // 读取会话设置（json格式）
             let response = client
                 .get(format!("{}/api/session/load", BASE_URL))
                 .send()
                 .await?;
 
+            // 转为SessionDesc结构体
             let session = match response.json::<alvr_session::SessionDesc>().await {
                 Ok(session) => session,
                 Err(why) => {
@@ -27,13 +33,18 @@ pub async fn handle_msg(
             };
 
             // Discarded as the receiving end will always be valid, and when it is not the dashboard is shutting down anyway
+            // 向worker线程发送会话设置，接收端放在GUI里面
             let _ = tx1.send(WorkerMsg::SessionResponse(session));
             false
         }
+
+        // 获取驱动列表
         GuiMsg::GetDrivers => {
             get_drivers(client, tx1).await?;
             false
         }
+
+        // Dashboard相关的命令
         GuiMsg::Dashboard(response) => match response {
             DashboardResponse::SessionUpdated(session) => {
                 let text = serde_json::to_string(&session).unwrap();

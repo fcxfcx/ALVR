@@ -134,6 +134,7 @@ fn main() {
     env_logger::init();
     let native_options = eframe::NativeOptions::default();
 
+    // 创建两组通道，一组用于工作线程，一组用于GUI线程
     let (tx1, rx1) = mpsc::channel::<WorkerMsg>();
     let (tx2, rx2) = mpsc::channel::<GuiMsg>();
 
