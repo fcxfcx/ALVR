@@ -60,6 +60,7 @@ const NETWORK_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(1);
 const CONNECTION_RETRY_INTERVAL: Duration = Duration::from_secs(1);
 const BATTERY_POLL_INTERVAL: Duration = Duration::from_secs(60);
 
+// 记录hud信息
 fn set_hud_message(message: &str) {
     let message = format!(
         "ALVR v{}\nhostname: {}\nIP: {}\n\n{message}",
@@ -77,11 +78,13 @@ pub fn connection_lifecycle_loop(
     recommended_view_resolution: UVec2,
     supported_refresh_rates: Vec<f32>,
 ) -> IntResult {
+    // 设置初始化hud信息
     set_hud_message(INITIAL_MESSAGE);
 
     let decoder_guard = Arc::new(Mutex::new(()));
 
     loop {
+        // 如果IS_ALIVE.value()为false则中断
         check_interrupt!(IS_ALIVE.value());
 
         if IS_RESUMED.value() {
@@ -113,9 +116,12 @@ fn connection_pipeline(
 ) -> IntResult {
     let runtime = Runtime::new().map_err(to_int_e!())?;
 
+    // 建立TCP连接后，得到流以及对端ip，对端即server端
     let (mut proto_control_socket, server_ip) = {
         let config = Config::load();
+        // 广播socket，用UDP
         let announcer_socket = AnnouncerSocket::new(&config.hostname).map_err(to_int_e!())?;
+        // 监听socket，用TCP
         let listener_socket = runtime
             .block_on(alvr_sockets::get_server_listener())
             .map_err(to_int_e!())?;
@@ -123,6 +129,7 @@ fn connection_pipeline(
         loop {
             check_interrupt!(IS_ALIVE.value());
 
+            // UDP广播信息
             if let Err(e) = announcer_socket.broadcast() {
                 warn!("Broadcast error: {e}");
 
@@ -135,6 +142,7 @@ fn connection_pipeline(
                 return Ok(());
             }
 
+            // 建立TCP连接后，得到流以及对端ip
             let maybe_pair = runtime.block_on(async {
                 tokio::select! {
                     maybe_pair = ProtoControlSocket::connect_to(PeerType::Server(&listener_socket)) => {
@@ -150,12 +158,14 @@ fn connection_pipeline(
         }
     };
 
+    // 麦克风采样率
     let microphone_sample_rate =
         AudioDevice::new(None, &AudioDeviceId::Default, AudioDeviceType::Input)
             .unwrap()
             .input_sample_rate()
             .unwrap();
 
+    // 利用已建立的TCP连接发送一些信息，比如展示名称、服务端ip、默认分辨率、支持的刷新率、麦克风采样率等等
     runtime
         .block_on(
             proto_control_socket.send(&ClientConnectionResult::ConnectionAccepted {
@@ -169,6 +179,8 @@ fn connection_pipeline(
             }),
         )
         .map_err(to_int_e!())?;
+    
+    // 阻塞读得到系统流配置包
     let config_packet = runtime
         .block_on(proto_control_socket.recv::<StreamConfigPacket>())
         .map_err(to_int_e!())?;
@@ -192,21 +204,26 @@ async fn stream_pipeline(
     let (control_sender, mut control_receiver) = proto_socket.split();
     let control_sender = Arc::new(Mutex::new(control_sender));
 
+    // 阻塞读
     match control_receiver.recv().await {
+        // 开始流
         Ok(ServerControlPacket::StartStream) => {
             info!("Stream starting");
             set_hud_message(STREAM_STARTING_MESSAGE);
         }
+        // server重启
         Ok(ServerControlPacket::Restarting) => {
             info!("Server restarting");
             set_hud_message(SERVER_RESTART_MESSAGE);
             return Ok(());
         }
+        // server断开
         Err(e) => {
             info!("Server disconnected. Cause: {e}");
             set_hud_message(SERVER_DISCONNECTED_MESSAGE);
             return Ok(());
         }
+        // 未知包
         _ => {
             info!("Unexpected packet");
             set_hud_message("Unexpected packet");
@@ -214,6 +231,7 @@ async fn stream_pipeline(
         }
     }
 
+    // settings对象里保存了之前server发过来的流配置信息
     let settings = {
         let mut session_desc = SessionDesc::default();
         session_desc
@@ -225,6 +243,7 @@ async fn stream_pipeline(
         settings.connection.statistics_history_size as _,
     ));
 
+    // StreamSocketBuilder对象里面包含流端口号、协议是TCP/UDP、发送接收的buf字节数
     let stream_socket_builder = StreamSocketBuilder::listen_for_server(
         settings.connection.stream_port,
         settings.connection.stream_protocol,
@@ -233,6 +252,7 @@ async fn stream_pipeline(
     )
     .await?;
 
+    // 通过TCP控制连接发送StreamReady消息
     if let Err(e) = control_sender
         .lock()
         .await
@@ -244,6 +264,7 @@ async fn stream_pipeline(
         return Ok(());
     }
 
+    // 主动和server建立流连接，返回stream_socket
     let stream_socket = tokio::select! {
         res = stream_socket_builder.accept_from_server(
             server_ip,
@@ -259,9 +280,11 @@ async fn stream_pipeline(
     info!("Connected to server");
 
     // create this before initializing the stream on cpp side
+    // control_channel_sender和control_channel_receiver用来在异步任务间通信
     let (control_channel_sender, mut control_channel_receiver) = tmpsc::unbounded_channel();
     *CONTROL_CHANNEL_SENDER.lock() = Some(control_channel_sender);
 
+    // 初始化编码器配置
     {
         let config = &mut *DECODER_INIT_CONFIG.lock();
 
@@ -274,7 +297,9 @@ async fn stream_pipeline(
             .mediacodec_extra_options;
     }
 
+    // 循环阻塞读data_receiver，收到hmd的tracking追踪信息后直接通过socket_sender转发给server
     let tracking_send_loop = {
+        // 通过stream_socket获得socket_sender对象
         let mut socket_sender = stream_socket.request_stream(TRACKING).await?;
         async move {
             let (data_sender, mut data_receiver) = tmpsc::unbounded_channel();
@@ -297,6 +322,7 @@ async fn stream_pipeline(
         }
     };
 
+    // 循环阻塞读data_receiver，收到hmd的Statistics统计信息后直接通过socket_sender转发给server
     let statistics_send_loop = {
         let mut socket_sender = stream_socket.request_stream(STATISTICS).await?;
         async move {
@@ -311,6 +337,7 @@ async fn stream_pipeline(
         }
     };
 
+    // 流开始事件保存了一些信息
     let streaming_start_event = ClientCoreEvent::StreamingStarted {
         view_resolution: stream_config.view_resolution,
         fps: stream_config.fps,
@@ -322,6 +349,7 @@ async fn stream_pipeline(
 
     IS_STREAMING.set(true);
 
+    // 接收视频流的loop
     let video_receive_loop = {
         let mut receiver = stream_socket.subscribe_to_stream::<Duration>(VIDEO).await?;
         let disconnection_critera = settings.connection.disconnection_criteria;
@@ -396,6 +424,7 @@ async fn stream_pipeline(
         }
     };
 
+    // 接收触觉流的loop
     let haptics_receive_loop = {
         let mut receiver = stream_socket
             .subscribe_to_stream::<Haptics>(HAPTICS)
@@ -414,6 +443,7 @@ async fn stream_pipeline(
         }
     };
 
+    // 游戏声音loop
     let game_audio_loop: BoxFuture<_> = if let Switch::Enabled(desc) = settings.audio.game_audio {
         let device = AudioDevice::new(None, &AudioDeviceId::Default, AudioDeviceType::Output)
             .map_err(err!())?;
@@ -430,6 +460,7 @@ async fn stream_pipeline(
         Box::pin(future::pending())
     };
 
+    // 麦克风loop
     let microphone_loop: BoxFuture<_> = if matches!(settings.audio.microphone, Switch::Enabled(_)) {
         let device = AudioDevice::new(None, &AudioDeviceId::Default, AudioDeviceType::Input)
             .map_err(err!())?;
@@ -445,6 +476,7 @@ async fn stream_pipeline(
         Box::pin(future::pending())
     };
 
+    // 开启一个线程用来做事件轮询
     // Poll for events that need a constant thread (mainly for the JNI env)
     thread::spawn(|| {
         #[cfg(target_os = "android")]
@@ -456,6 +488,7 @@ async fn stream_pipeline(
         let mut battery_poll_deadline = Instant::now();
 
         while IS_STREAMING.value() {
+            // 每60s执行一次，更新hmd的电池状态
             if battery_poll_deadline < Instant::now() {
                 let new_hmd_battery_status = platform::battery_status();
 
@@ -480,6 +513,7 @@ async fn stream_pipeline(
         }
     });
 
+    // 每隔1s通过负责控制的TCP连接发送一条KeepAlive消息，如果Server断开则loop退出
     let keepalive_sender_loop = {
         let control_sender = Arc::clone(&control_sender);
         async move {
@@ -500,6 +534,7 @@ async fn stream_pipeline(
         }
     };
 
+    // 循环阻塞读control_channel_receiver的packet并通过负责控制的TCP连接发给server
     let control_send_loop = async move {
         while let Some(packet) = control_channel_receiver.recv().await {
             control_sender.lock().await.send(&packet).await.ok();
@@ -508,6 +543,7 @@ async fn stream_pipeline(
         Ok(())
     };
 
+    // 循环阻塞读server发过来的消息并做处理
     let control_receive_loop = async move {
         loop {
             match control_receiver.recv().await {
@@ -537,6 +573,7 @@ async fn stream_pipeline(
     let receive_loop = async move { stream_socket.receive_loop().await };
 
     // Run many tasks concurrently. Threading is managed by the runtime, for best performance.
+    // 所有loop的future异步执行，直到被取消
     tokio::select! {
         res = spawn_cancelable(receive_loop) => {
             if let Err(e) = res {
