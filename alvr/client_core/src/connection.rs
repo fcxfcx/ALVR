@@ -379,9 +379,12 @@ async fn stream_pipeline(
 
             EVENT_QUEUE.lock().push_back(streaming_start_event);
 
+            // 接收的缓冲区
             let mut receiver_buffer = ReceiverBuffer::new();
             let mut disconnection_timer_begin = None;
+            // 接收信息的循环
             loop {
+                // 从receiver缓冲区中获取信息
                 receiver.recv_buffer(&mut receiver_buffer).await?;
                 let (timestamp, nal) = receiver_buffer.get()?;
 
@@ -392,17 +395,21 @@ async fn stream_pipeline(
                 if let Some(stats) = &mut *STATISTICS_MANAGER.lock() {
                     stats.report_video_packet_received(timestamp);
                 }
-
+                
+                // 把数据压到解码队列的队尾
                 decoder::push_nal(timestamp, nal);
 
+                // 丢包监测
                 if receiver_buffer.had_packet_loss() {
                     if let Some(sender) = &*CONTROL_CHANNEL_SENDER.lock() {
                         sender.send(ClientControlPacket::VideoErrorReport).ok();
                     }
                 }
-
+                
+                // 貌似在做一些QOE方面的检测，涉及到时延阈值与超时断连
                 if let Switch::Enabled(criteria) = &disconnection_critera {
                     if let Some(stats) = &*STATISTICS_MANAGER.lock() {
+                        // 比较预测时延与时延阈值
                         if stats.average_total_pipeline_latency()
                             < Duration::from_millis(criteria.latency_threshold_ms)
                         {

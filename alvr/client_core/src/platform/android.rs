@@ -444,7 +444,8 @@ pub fn video_decoder_split(
             image_reader
                 .set_buffer_removed_listener(Box::new(|_, _| ()))
                 .unwrap();
-
+            
+            // 解码器在这里定义
             let decoder = Arc::new(FakeThreadSafe(
                 MediaCodec::from_decoder_type(&mime).unwrap(),
             ));

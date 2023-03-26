@@ -986,7 +986,9 @@ pub fn session_settings_default() -> SettingsDefault {
             disconnection_criteria: SwitchDefault {
                 enabled: false,
                 content: DisconnectionCriteriaDefault {
+                    // 时延的阈值
                     latency_threshold_ms: 150,
+                    // 可能3秒后会发送断连指令？？？
                     sustain_duration_s: 3,
                 },
             },

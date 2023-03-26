@@ -81,6 +81,9 @@ impl ALVRDashboard {
     }
 }
 
+// 在这里，为dashbored实现了update，说明dashboard使用的是原生方法
+// 在https://docs.rs/eframe/latest/eframe/中，可知main.rs相当于eframe的入口
+// 事实上，client_mock,dashbored,laucher使用的都是原生
 impl eframe::App for ALVRDashboard {
     fn update(&mut self, ctx: &eframe::egui::Context, _frame: &mut eframe::Frame) {
         for msg in self.rx1.try_iter() {
