@@ -22,33 +22,8 @@ impl<T> SlidingWindowAverage<T> {
     }
 }
 
-impl SlidingWindowAverage<u64> {
-    pub fn get_average(&self) -> u64 {
-        if !self.history_buffer.is_empty() {
-            self.history_buffer.iter().sum::<u64>() / self.history_buffer.len() as u64
-        } else {
-            self.initial_value
-        }
-    }
-}
-
 impl SlidingWindowAverage<f32> {
     pub fn get_average(&self) -> f32 {
-        if !self.history_buffer.is_empty() {
-            self.history_buffer.iter().sum::<f32>() / self.history_buffer.len() as f32
-        } else {
-            self.initial_value
-        }
-    }
-}
-
-impl SlidingWindowAverage<usize> {
-    pub fn get_average(&self) -> usize {
-        if !self.history_buffer.is_empty() {
-            self.history_buffer.iter().sum::<usize>() / self.history_buffer.len()
-        } else {
-            self.initial_value
-        }
         self.history_buffer.iter().sum::<f32>() / self.history_buffer.len() as f32
     }
 }
