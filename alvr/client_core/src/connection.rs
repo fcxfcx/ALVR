@@ -381,6 +381,7 @@ async fn stream_pipeline(
 
             // 接收的缓冲区
             let mut receiver_buffer = ReceiverBuffer::new();
+            // 超时断连计时器
             let mut disconnection_timer_begin = None;
             // 接收信息的循环
             loop {
@@ -407,16 +408,19 @@ async fn stream_pipeline(
                 }
                 
                 // 貌似在做一些QOE方面的检测，涉及到时延阈值与超时断连
+                // todo 但是Switch::Enabled()的用处是？
                 if let Switch::Enabled(criteria) = &disconnection_critera {
                     if let Some(stats) = &*STATISTICS_MANAGER.lock() {
-                        // 比较预测时延与时延阈值
+                        // 比较预测时延与时延阈值，如果小于就不必继续判断断连超时
                         if stats.average_total_pipeline_latency()
                             < Duration::from_millis(criteria.latency_threshold_ms)
                         {
                             disconnection_timer_begin = None;
                         } else {
+                            // 要拿到计时开始的时间
                             let begin = disconnection_timer_begin.unwrap_or_else(Instant::now);
 
+                            // 判断是否超时
                             if Instant::now()
                                 > begin + Duration::from_secs(criteria.sustain_duration_s)
                             {
