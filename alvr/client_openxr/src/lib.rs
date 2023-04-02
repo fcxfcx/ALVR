@@ -888,7 +888,7 @@ fn xr_runtime_now(xr_instance: &xr::Instance, platform: Platform) -> Option<Dura
 fn android_main(app: android_activity::AndroidApp) {
     use android_activity::{InputStatus, MainEvent, PollEvent};
 
-    // 开了一个进程负责渲染
+    // 开了一个线程负责渲染
     let rendering_thread = thread::spawn(|| {
         // workaround for the Pico runtime
         let context = ndk_context::android_context();

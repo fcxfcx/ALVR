@@ -310,7 +310,7 @@ pub fn build_android_client(profile: Profile) {
         }
     }
 
-    // 看样子，cargo apk命令是在'alvr\client_core'路径下运行的
+    // 看样子，cargo apk命令是在'alvr\client_openxr'路径下运行的
     let _push_guard = sh.push_dir(afs::crate_dir("client_openxr"));
     // 使用 cargo apk工具包，build apk
     cmd!(
