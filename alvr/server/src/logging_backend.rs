@@ -1,63 +1,20 @@
 use crate::{FILESYSTEM_LAYOUT, SERVER_DATA_MANAGER};
-use alvr_common::log::{self, LevelFilter};
-use alvr_events::{Event, EventSeverity, EventType, LogEvent};
+use alvr_common::{log::LevelFilter, LogSeverity};
+use alvr_events::{Event, EventType, LogEvent};
 use chrono::Local;
 use fern::Dispatch;
 use std::fs;
 use tokio::sync::broadcast::Sender;
 
 // todo: don't stringify events immediately, use Sender<Event>
-pub fn init_logging(
-    log_sender: Sender<String>,
-    legacy_events_sender: Sender<String>,
-    events_sender: Sender<Event>,
-) {
+pub fn init_logging(events_sender: Sender<Event>) {
     let mut log_dispatch = Dispatch::new().format(move |out, message, record| {
         let maybe_event = format!("{message}");
-        if maybe_event.starts_with('{') {
-            legacy_events_sender.send(maybe_event.clone()).ok();
-        } else {
-            let severity = match record.level() {
-                log::Level::Error => EventSeverity::Error,
-                log::Level::Warn => EventSeverity::Warning,
-                log::Level::Info => EventSeverity::Info,
-                log::Level::Debug | log::Level::Trace => EventSeverity::Debug,
-            };
-
-            let event = EventType::Log(LogEvent {
-                severity,
-                content: message.to_string(),
-            });
-
-            legacy_events_sender
-                .send(serde_json::to_string(&event).unwrap())
-                .ok();
-        }
-        let log_message = if maybe_event.starts_with('{') {
-            format!("#{}#", maybe_event)
-        } else {
-            maybe_event.clone()
-        };
-        log_sender
-            .send(format!(
-                "{} [{}] {log_message}",
-                chrono::Local::now().format("%H:%M:%S.%f"),
-                record.level()
-            ))
-            .ok();
-
-        let event_type = if maybe_event.starts_with('{') {
+        let event_type = if maybe_event.starts_with('{') && maybe_event.ends_with('}') {
             serde_json::from_str(&maybe_event).unwrap()
         } else {
-            let severity = match record.level() {
-                log::Level::Error => EventSeverity::Error,
-                log::Level::Warn => EventSeverity::Warning,
-                log::Level::Info => EventSeverity::Info,
-                log::Level::Debug | log::Level::Trace => EventSeverity::Debug,
-            };
-
             EventType::Log(LogEvent {
-                severity,
+                severity: LogSeverity::from_log_level(record.level()),
                 content: message.to_string(),
             })
         };

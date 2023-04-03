@@ -5,12 +5,13 @@ use crate::{
     DECODER_CONFIG, DISCONNECT_CLIENT_NOTIFIER, HAPTICS_SENDER, IS_ALIVE, RESTART_NOTIFIER,
     SERVER_DATA_MANAGER, STATISTICS_MANAGER, VIDEO_RECORDING_FILE, VIDEO_SENDER,
 };
-use alvr_audio::{AudioDevice, AudioDeviceType};
+use alvr_audio::AudioDevice;
 use alvr_common::{
     glam::{UVec2, Vec2},
     once_cell::sync::Lazy,
     parking_lot,
     prelude::*,
+    settings_schema::Switch,
     RelaxedAtomic, DEVICE_ID_TO_PATH, LEFT_HAND_ID, RIGHT_HAND_ID,
 };
 use alvr_events::{ButtonEvent, ButtonValue, EventType, HapticsEvent};
@@ -22,7 +23,6 @@ use alvr_sockets::{
     KEEPALIVE_INTERVAL, STATISTICS, TRACKING, VIDEO,
 };
 use futures::future::BoxFuture;
-use settings_schema::Switch;
 use std::{
     collections::{HashMap, HashSet},
     future,
@@ -107,8 +107,13 @@ pub fn handshake_loop(frame_interval_sender: smpsc::Sender<Duration>) -> IntResu
             let trusted = {
                 let mut data_manager = SERVER_DATA_MANAGER.write();
 
-                data_manager
-                    .update_client_list(client_hostname.clone(), ClientListAction::AddIfMissing);
+                data_manager.update_client_list(
+                    client_hostname.clone(),
+                    ClientListAction::AddIfMissing {
+                        trusted: false,
+                        manual_ips: vec![],
+                    },
+                );
 
                 // 查看是否配置为自动信任client，如果是需要更新client_list并设置trusted为true
                 if config.auto_trust_clients {
@@ -207,25 +212,34 @@ fn try_connect(
 
     let settings = SERVER_DATA_MANAGER.read().settings().clone();
 
-    // 配置streaming的分辨率，可以是相对于默认分辨率的比例，也可以是绝对的分辨率
-    // 默认的分辨率是对应Quest的2880x1600，默认的scale是0.75
-    let stream_view_resolution = match settings.video.render_resolution {
-        FrameSize::Scale(scale) => streaming_caps.default_view_resolution.as_vec2() * scale,
-        FrameSize::Absolute { width, height } => Vec2::new(width as f32 / 2_f32, height as f32),
-    };
-    let stream_view_resolution = UVec2::new(
-        align32(stream_view_resolution.x),
-        align32(stream_view_resolution.y),
+    fn get_view_res(config: FrameSize, default_res: UVec2) -> UVec2 {
+        // 配置streaming的分辨率，可以是相对于默认分辨率的比例，也可以是绝对的分辨率
+        // 默认的分辨率是对应Quest的2880x1600，默认的scale是0.75
+        let res = match config {
+            FrameSize::Scale(scale) => default_res.as_vec2() * scale,
+            FrameSize::Absolute { width, height } => {
+                let width = width as f32;
+                Vec2::new(
+                    width,
+                    height.map(|h| h as f32).unwrap_or_else(|| {
+                        let default_res = default_res.as_vec2();
+                        width * default_res.y / default_res.x
+                    }),
+                )
+            }
+        };
+
+        UVec2::new(align32(res.x), align32(res.y))
+    }
+
+    let stream_view_resolution = get_view_res(
+        settings.video.transcoding_view_resolution,
+        streaming_caps.default_view_resolution,
     );
 
-    // 默认的推荐分辨率scale也是0.75
-    let target_view_resolution = match settings.video.recommended_target_resolution {
-        FrameSize::Scale(scale) => streaming_caps.default_view_resolution.as_vec2() * scale,
-        FrameSize::Absolute { width, height } => Vec2::new(width as f32 / 2_f32, height as f32),
-    };
-    let target_view_resolution = UVec2::new(
-        align32(target_view_resolution.x),
-        align32(target_view_resolution.y),
+    let target_view_resolution = get_view_res(
+        settings.video.emulated_headset_view_resolution,
+        streaming_caps.default_view_resolution,
     );
 
     // 配置streaming的fps（默认是72）
@@ -251,24 +265,25 @@ fn try_connect(
     }
 
     // 音频相关的配置
-    let game_audio_sample_rate = if let Switch::Enabled(game_audio_desc) = settings.audio.game_audio
+    let game_audio_sample_rate = if let Switch::Enabled(game_audio_config) =
+        settings.audio.game_audio
     {
-        let game_audio_device = AudioDevice::new(
+        let game_audio_device = AudioDevice::new_output(
             Some(settings.audio.linux_backend),
-            &game_audio_desc.device_id,
-            AudioDeviceType::Output,
+            game_audio_config.device.as_ref(),
         )
         .map_err(to_int_e!())?;
 
+        #[cfg(not(target_os = "linux"))]
         if let Switch::Enabled(microphone_desc) = settings.audio.microphone {
-            let microphone_device = AudioDevice::new(
+            let (sink, source) = AudioDevice::new_virtual_microphone_pair(
                 Some(settings.audio.linux_backend),
-                &microphone_desc.input_device_id,
-                AudioDeviceType::VirtualMicrophoneInput,
+                microphone_desc.devices,
             )
             .map_err(to_int_e!())?;
-            #[cfg(not(target_os = "linux"))]
-            if alvr_audio::is_same_device(&game_audio_device, &microphone_device) {
+            if alvr_audio::is_same_device(&game_audio_device, &sink)
+                || alvr_audio::is_same_device(&game_audio_device, &source)
+            {
                 return int_fmt_e!("Game audio and microphone cannot point to the same device!");
             }
         }
@@ -379,7 +394,7 @@ fn try_connect(
         enable_vive_tracker_proxy: settings.headset.enable_vive_tracker_proxy,
         aggressive_keyframe_resend: settings.connection.aggressive_keyframe_resend,
         adapter_index: settings.video.adapter_index,
-        codec: matches!(settings.video.codec, CodecType::HEVC) as _,
+        codec: matches!(settings.video.codec, CodecType::Hevc) as _,
         rate_control_mode: settings.video.rate_control_mode as u32,
         filler_data: settings.video.filler_data,
         entropy_coding: settings.video.entropy_coding as u32,
@@ -389,7 +404,8 @@ fn try_connect(
         use_preproc: amf_controls.use_preproc,
         preproc_sigma: amf_controls.preproc_sigma,
         preproc_tor: amf_controls.preproc_tor,
-        encoder_quality_preset: settings.video.advanced_codec_options.encoder_quality_preset as u32,
+        nvenc_quality_preset: nvenc_overrides.nvenc_quality_preset as u32,
+        amd_encoder_quality_preset: amf_controls.amd_encoder_quality_preset as u32,
         force_sw_encoding: settings.video.force_sw_encoding,
         sw_thread_count: settings.video.sw_thread_count,
         controllers_enabled,
@@ -597,9 +613,6 @@ async fn connection_pipeline(
         .send(Duration::from_secs_f32(1.0 / refresh_rate))
         .ok();
 
-    // 成功连接的标志
-    alvr_events::send_event(EventType::ClientConnected);
-
     {
         // 如果有配置在连接时执行的脚本，则执行
         let on_connect_script = settings.connection.on_connect_script;
@@ -627,16 +640,15 @@ async fn connection_pipeline(
     let _stream_guard = StreamCloseGuard(Arc::clone(&is_streaming));
 
     // 负责音频传输的部分
-    let game_audio_loop: BoxFuture<_> = if let Switch::Enabled(desc) = settings.audio.game_audio {
+    let game_audio_loop: BoxFuture<_> = if let Switch::Enabled(config) = settings.audio.game_audio {
         // 构造一个新的流，用于传输音频（音频流的id是2）
         let sender = stream_socket.request_stream(AUDIO).await?;
         Box::pin(async move {
             loop {
                 // 新建一个AudioDevice，用于获取音频数据（linux_backend在非linux系统上是None）
-                let device = match AudioDevice::new(
+                let device = match AudioDevice::new_output(
                     Some(settings.audio.linux_backend),
-                    &desc.device_id,
-                    AudioDeviceType::Output,
+                    config.device.as_ref(),
                 ) {
                     Ok(data) => data,
                     Err(e) => {
@@ -645,52 +657,40 @@ async fn connection_pipeline(
                         continue;
                     }
                 };
-                let mute_when_streaming = desc.mute_when_streaming;
+                let mute_when_streaming = config.mute_when_streaming;
 
                 #[cfg(windows)]
-                unsafe {
-                    // 获取音频设备的id，然后设置到openvr里
-                    let device_id = match alvr_audio::get_windows_device_id(&device) {
-                        Ok(data) => data,
-                        Err(_) => continue,
-                    };
-                    crate::SetOpenvrProperty(
-                        *alvr_common::HEAD_ID,
-                        crate::openvr_props::to_ffi_openvr_prop(
-                            alvr_session::OpenvrPropertyKey::AudioDefaultPlaybackDeviceId,
-                            alvr_session::OpenvrPropValue::String(device_id),
-                        ),
-                    )
-                }
-                let new_sender = sender.clone();
-                match alvr_audio::record_audio_loop(device, 2, mute_when_streaming, new_sender)
-                    .await
-                {
-                    Ok(_) => (),
-                    Err(e) => warn!("Audio task exit with error : {e}"),
-                };
-
-                #[cfg(windows)]
-                {
-                    let default_device = match AudioDevice::new(
-                        None,
-                        &alvr_session::AudioDeviceId::Default,
-                        AudioDeviceType::Output,
-                    ) {
-                        Ok(data) => data,
-                        Err(_) => continue,
-                    };
-                    let default_device_id = match alvr_audio::get_windows_device_id(&default_device)
-                    {
-                        Ok(data) => data,
-                        Err(_) => continue,
-                    };
+                if let Ok(id) = alvr_audio::get_windows_device_id(&device) {
                     unsafe {
                         crate::SetOpenvrProperty(
                             *alvr_common::HEAD_ID,
                             crate::openvr_props::to_ffi_openvr_prop(
                                 alvr_session::OpenvrPropertyKey::AudioDefaultPlaybackDeviceId,
-                                alvr_session::OpenvrPropValue::String(default_device_id),
+                                alvr_session::OpenvrPropValue::String(id),
+                            ),
+                        )
+                    }
+                } else {
+                    continue;
+                };
+
+                let new_sender = sender.clone();
+                if let Err(e) =
+                    alvr_audio::record_audio_loop(device, 2, mute_when_streaming, new_sender).await
+                {
+                    warn!("Audio task exit with error : {e}")
+                }
+
+                #[cfg(windows)]
+                if let Ok(id) =
+                    alvr_audio::get_windows_device_id(&AudioDevice::new_output(None, None)?)
+                {
+                    unsafe {
+                        crate::SetOpenvrProperty(
+                            *alvr_common::HEAD_ID,
+                            crate::openvr_props::to_ffi_openvr_prop(
+                                alvr_session::OpenvrPropertyKey::AudioDefaultPlaybackDeviceId,
+                                alvr_session::OpenvrPropValue::String(id),
                             ),
                         )
                     }
@@ -700,41 +700,34 @@ async fn connection_pipeline(
     } else {
         Box::pin(future::pending())
     };
+
     // 负责麦克风传输的部分
-    let microphone_loop: BoxFuture<_> = if let Switch::Enabled(desc) = settings.audio.microphone {
-        let input_device = AudioDevice::new(
+    let microphone_loop: BoxFuture<_> = if let Switch::Enabled(config) = settings.audio.microphone {
+        #[allow(unused_variables)]
+        let (sink, source) = AudioDevice::new_virtual_microphone_pair(
             Some(settings.audio.linux_backend),
-            &desc.input_device_id,
-            AudioDeviceType::VirtualMicrophoneInput,
+            config.devices,
         )?;
         let receiver = stream_socket.subscribe_to_stream(AUDIO).await?;
 
         #[cfg(windows)]
-        {
-            let microphone_device = AudioDevice::new(
-                None,
-                &desc.output_device_id,
-                AudioDeviceType::VirtualMicrophoneOutput {
-                    matching_input_device_name: input_device.name()?,
-                },
-            )?;
-            let microphone_device_id = alvr_audio::get_windows_device_id(&microphone_device)?;
+        if let Ok(id) = alvr_audio::get_windows_device_id(&source) {
             unsafe {
                 crate::SetOpenvrProperty(
                     *alvr_common::HEAD_ID,
                     crate::openvr_props::to_ffi_openvr_prop(
                         alvr_session::OpenvrPropertyKey::AudioDefaultRecordingDeviceId,
-                        alvr_session::OpenvrPropValue::String(microphone_device_id),
+                        alvr_session::OpenvrPropValue::String(id),
                     ),
                 )
             }
         }
 
         Box::pin(alvr_audio::play_audio_loop(
-            input_device,
+            sink,
             1,
             microphone_sample_rate,
-            desc.buffering_config,
+            config.buffering,
             receiver,
         ))
     } else {
@@ -932,7 +925,6 @@ async fn connection_pipeline(
                     .send(&ServerControlPacket::KeepAlive)
                     .await;
                 if let Err(e) = res {
-                    alvr_events::send_event(EventType::ClientDisconnected);
                     info!("Client disconnected. Cause: {e}");
                     break Ok(());
                 }
@@ -1041,7 +1033,6 @@ async fn connection_pipeline(
                 }
                 Ok(_) => (),
                 Err(e) => {
-                    alvr_events::send_event(EventType::ClientDisconnected);
                     info!("Client disconnected. Cause: {e}");
                     break;
                 }
@@ -1057,8 +1048,6 @@ async fn connection_pipeline(
         // Spawn new tasks and let the runtime manage threading
         // 开启所有的loop任务，有任何一个loop任务结束，就会返回
         res = spawn_cancelable(receive_loop) => {
-            // 如果是接收消息的loop任务结束了，就会发送ClientDisconnected事件
-            alvr_events::send_event(EventType::ClientDisconnected);
             if let Err(e) = res {
                 info!("Client disconnected. Cause: {e}" );
             }

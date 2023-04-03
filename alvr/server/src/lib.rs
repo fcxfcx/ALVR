@@ -1,7 +1,6 @@
 mod bitrate;
 mod buttons;
 mod connection;
-mod dashboard;
 mod haptics;
 mod logging_backend;
 mod openvr_props;
@@ -28,13 +27,13 @@ use alvr_common::{
     once_cell::sync::{Lazy, OnceCell},
     parking_lot::{Mutex, RwLock},
     prelude::*,
-    RelaxedAtomic, ALVR_VERSION,
+    RelaxedAtomic,
 };
 use alvr_events::EventType;
 use alvr_filesystem::{self as afs, Layout};
 use alvr_server_data::ServerDataManager;
 use alvr_session::CodecType;
-use alvr_sockets::{ClientListAction, GpuVendor, Haptics, ServerControlPacket};
+use alvr_sockets::{ClientListAction, Haptics, ServerControlPacket};
 use bitrate::BitrateManager;
 use statistics::StatisticsManager;
 use std::{
@@ -63,7 +62,6 @@ static SERVER_DATA_MANAGER: Lazy<RwLock<ServerDataManager>> =
     Lazy::new(|| RwLock::new(ServerDataManager::new(&FILESYSTEM_LAYOUT.session())));
 static WEBSERVER_RUNTIME: Lazy<Mutex<Option<Runtime>>> =
     Lazy::new(|| Mutex::new(Runtime::new().ok()));
-static WINDOW: Lazy<Mutex<Option<Arc<WindowType>>>> = Lazy::new(|| Mutex::new(None));
 
 static STATISTICS_MANAGER: Lazy<Mutex<Option<StatisticsManager>>> = Lazy::new(|| Mutex::new(None));
 
@@ -81,11 +79,10 @@ static BITRATE_MANAGER: Lazy<Mutex<BitrateManager>> = Lazy::new(|| {
     ))
 });
 
-
 //结构体：视频包
 pub struct VideoPacket {
-    pub timestamp: Duration,    //时间戳
-    pub payload: Vec<u8>,     //有效载荷
+    pub timestamp: Duration, //时间戳
+    pub payload: Vec<u8>,    //有效载荷
 }
 
 static CONTROL_CHANNEL_SENDER: Lazy<Mutex<Option<mpsc::UnboundedSender<ServerControlPacket>>>> =
@@ -159,111 +156,65 @@ pub fn create_recording_file() {
     }
 }
 
-pub fn shutdown_runtimes() {
-    alvr_events::send_event(EventType::ServerQuitting);
-
-    // Shutsdown all connection runtimes
+pub fn shutdown_tasks() {
+    // Invoke connection runtimes shutdown
+    // todo: block until they shutdown
     IS_ALIVE.set(false);
 
-    if let Some(window_type) = WINDOW.lock().take() {
-        match window_type.as_ref() {
-            WindowType::Alcro(window) => window.close(),
-            WindowType::Browser => (),
-        }
+    if let Some(backup) = SERVER_DATA_MANAGER
+        .write()
+        .session_mut()
+        .drivers_backup
+        .take()
+    {
+        alvr_commands::driver_registration(&backup.other_paths, true).ok();
+        alvr_commands::driver_registration(&[backup.alvr_path], false).ok();
     }
 
     WEBSERVER_RUNTIME.lock().take();
 }
 
-pub fn notify_shutdown_driver() {
+pub fn notify_restart_driver() {
+    alvr_events::send_event(EventType::ServerRequestsSelfRestart);
+
     thread::spawn(|| {
         RESTART_NOTIFIER.notify_waiters();
 
         // give time to the control loop to send the restart packet (not crucial)
-        thread::sleep(Duration::from_millis(100));
+        thread::sleep(Duration::from_millis(200));
 
-        shutdown_runtimes();
+        shutdown_tasks();
 
         unsafe { ShutdownSteamvr() };
     });
 }
 
-pub fn notify_restart_driver() {
-    notify_shutdown_driver();
-
-    alvr_commands::restart_steamvr(&FILESYSTEM_LAYOUT.launcher_exe()).ok();
-}
-
-pub fn notify_application_update() {
-    notify_shutdown_driver();
-
-    alvr_commands::invoke_application_update(&FILESYSTEM_LAYOUT.launcher_exe()).ok();
-}
-
 fn init() {
     // 配置日志相关的服务，启动channel
-    let (log_sender, _) = broadcast::channel(web_server::WS_BROADCAST_CAPACITY);
-    let (legacy_events_sender, _) = broadcast::channel(web_server::WS_BROADCAST_CAPACITY);
     let (events_sender, _) = broadcast::channel(web_server::WS_BROADCAST_CAPACITY);
-    logging_backend::init_logging(
-        log_sender.clone(),
-        legacy_events_sender.clone(),
-        events_sender.clone(),
-    );
+    logging_backend::init_logging(events_sender.clone());
 
     if let Some(runtime) = WEBSERVER_RUNTIME.lock().as_mut() {
-        // Acquire and drop the data manager lock to create session.json if not present
-        // this is needed until Settings.cpp is replaced with Rust. todo: remove
-        SERVER_DATA_MANAGER.write().session_mut();
-
-        // 获取当前的客户端连接列表，返回的是一个HashMap
-        let connections = SERVER_DATA_MANAGER
-            .read()
-            .session()
-            .client_connections
-            .clone();
-        // 遍历客户端连接列表，如果客户端连接不是可信的，就从客户端连接列表中删除
-        for (hostname, connection) in connections {
-            if !connection.trusted {
-                SERVER_DATA_MANAGER
-                    .write()
-                    .update_client_list(hostname, ClientListAction::RemoveEntry);
-            }
-        }
-
-        // 通过Runtime::spawn方法，启动一个异步任务，这个异步任务会启动一个web服务器
         runtime.spawn(alvr_common::show_err_async(web_server::web_server(
-            log_sender,
-            legacy_events_sender,
             events_sender,
         )));
-
-        // 通过Runtime::spawn方法，启动一个异步任务，这个异步任务会启动UI线程，展示前端界面
-        thread::spawn(|| alvr_common::show_err(dashboard::ui_thread()));
     }
 
     {
-        let mut data_manager = SERVER_DATA_MANAGER.write();
-        if data_manager
-            .get_gpu_vendors()
-            .iter()
-            .any(|vendor| matches!(vendor, GpuVendor::Nvidia))
+        let mut data_manager_lock = SERVER_DATA_MANAGER.write();
+
+        let connections = data_manager_lock.session().client_connections.clone();
+        for (hostname, connection) in connections {
+            if !connection.trusted {
+                data_manager_lock.update_client_list(hostname, ClientListAction::RemoveEntry);
+            }
+        }
+
+        for conn in data_manager_lock
+            .session_mut()
+            .client_connections
+            .values_mut()
         {
-            data_manager
-                .session_mut()
-                .session_settings
-                .extra
-                .patches
-                .linux_async_reprojection = false;
-        }
-
-        if data_manager.session().server_version != *ALVR_VERSION {
-            let mut session_ref = data_manager.session_mut();
-            session_ref.server_version = ALVR_VERSION.clone();
-            session_ref.client_connections.clear();
-        }
-
-        for conn in data_manager.session_mut().client_connections.values_mut() {
             conn.current_ip = None;
         }
     }
@@ -367,25 +318,23 @@ pub unsafe extern "C" fn HmdDriverFactory(
         *DECODER_CONFIG.lock() = Some(config_buffer);
     }
 
-
-// 用 "C" 语言的方式导出函数
+    // 用 "C" 语言的方式导出函数
     extern "C" fn video_send(timestamp_ns: u64, buffer_ptr: *mut u8, len: i32) {
         // 获取 VIDEO_SENDER 的锁，如果成功获取则执行闭包内的代码
         if let Some(sender) = &*VIDEO_SENDER.lock() {
-                  // 将传入的纳秒时间戳转换为持续时间
+            // 将传入的纳秒时间戳转换为持续时间
             let timestamp = Duration::from_nanos(timestamp_ns);
-           
-              // 创建一个长度为 len 的 u8 类型的数组，并将所有元素初始化为 0
+
+            // 创建一个长度为 len 的 u8 类型的数组，并将所有元素初始化为 0
             let mut payload = vec![0; len as _];
 
-            
-           // 使用 copy_nonoverlapping（也称为 memcpy）以避免释放由 C++ 分配的内存
-           // 将 buffer_ptr 指向的 len 个字节从 C++ 的内存复制到 Rust 的 payload 向量中
+            // 使用 copy_nonoverlapping（也称为 memcpy）以避免释放由 C++ 分配的内存
+            // 将 buffer_ptr 指向的 len 个字节从 C++ 的内存复制到 Rust 的 payload 向量中
             // use copy_nonoverlapping (aka memcpy) to avoid freeing memory allocated by C++
             unsafe {
                 ptr::copy_nonoverlapping(buffer_ptr, payload.as_mut_ptr(), len as _);
             }
-             // 如果 VIDEO_MIRROR_SENDER 的锁获取成功，则将 payload 向量的副本发送到视频镜像发送器中
+            // 如果 VIDEO_MIRROR_SENDER 的锁获取成功，则将 payload 向量的副本发送到视频镜像发送器中
             if let Some(sender) = &*VIDEO_MIRROR_SENDER.lock() {
                 sender.send(payload.clone()).ok();
             }
@@ -395,7 +344,7 @@ pub unsafe extern "C" fn HmdDriverFactory(
             }
             // 将 timestamp 和 payload 作为参数，构建 VideoPacket 并将其发送到 sender 中
             sender.send(VideoPacket { timestamp, payload }).ok();
-             // 如果 STATISTICS_MANAGER 的锁获取成功，则报告视频包的长度
+            // 如果 STATISTICS_MANAGER 的锁获取成功，则报告视频包的长度
             if let Some(stats) = &mut *STATISTICS_MANAGER.lock() {
                 stats.report_video_packet(len as _);
             }
@@ -420,10 +369,6 @@ pub unsafe extern "C" fn HmdDriverFactory(
     }
 
     pub extern "C" fn driver_ready_idle(set_default_chap: bool) {
-        alvr_common::show_err(alvr_commands::apply_driver_paths_backup(
-            FILESYSTEM_LAYOUT.openvr_driver_root_dir.clone(),
-        ));
-
         IS_ALIVE.set(true);
 
         let (frame_interval_sender, frame_interval_receiver) = sync::mpsc::channel();
@@ -464,15 +409,14 @@ pub unsafe extern "C" fn HmdDriverFactory(
     }
 
     extern "C" fn _shutdown_runtime() {
-        shutdown_runtimes();
+        shutdown_tasks();
     }
 
     unsafe extern "C" fn path_string_to_hash(path: *const c_char) -> u64 {
         alvr_common::hash_string(CStr::from_ptr(path).to_str().unwrap())
     }
 
-
-     // extern "C" 它的意思就是告诉编译器将extern “C”后面的括号里的代码当做C代码来处理
+    // extern "C" 它的意思就是告诉编译器将extern “C”后面的括号里的代码当做C代码来处理
     extern "C" fn report_present(timestamp_ns: u64, offset_ns: u64) {
         // 用 lock 方法获取 STATISTICS_MANAGER 的 MutexGuard，如果获取失败则跳过
         if let Some(stats) = &mut *STATISTICS_MANAGER.lock() {

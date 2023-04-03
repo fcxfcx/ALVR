@@ -1,5 +1,4 @@
 use alvr_common::{prelude::*, StrResult, *};
-use alvr_events::EventType;
 use alvr_sockets::{CONTROL_PORT, HANDSHAKE_PACKET_SIZE_BYTES, LOCAL_IP};
 use std::{
     io::ErrorKind,
@@ -54,15 +53,9 @@ impl WelcomeSocket {
 
             // 对比收到的protocol_id和当前使用的protocol_id是否一致（这个id是由ALVR版本hash处理得来的）
             if received_protocol_id != alvr_common::protocol_id() {
-                let message = format!(
-                    "Expected protocol ID {}, Found {received_protocol_id}",
-                    alvr_common::protocol_id()
-                );
-                // 向前端发送一个事件，告诉前端客户端版本不对（发送的是一个info级别的log）
-                alvr_events::send_event(EventType::ClientFoundWrongVersion(message.clone()));
-                warn!("Found incompatible client! Upgrade or downgrade");
-
-                return int_fmt_e!("{message}");
+                warn!("Found incompatible client! Upgrade or downgrade\nExpected protocol ID {}, Found {received_protocol_id}",
+                alvr_common::protocol_id());
+                return interrupt();
             }
 
             // 解析24到56的32个字节为hostname
@@ -75,14 +68,11 @@ impl WelcomeSocket {
 
             // 解析完毕后返回客户端的IP和hostname
             Ok((hostname, address.ip()))
-        } else if &self.buffer[..16] == b"\x00\x00\x00\x00\x04\x00\x00\x00\x00\x00\x00\x00ALVR" {
+        } else if &self.buffer[..16] == b"\x00\x00\x00\x00\x04\x00\x00\x00\x00\x00\x00\x00ALVR"
+            || &self.buffer[..5] == b"\x01ALVR"
+        {
             // 对历史版本的判断，也属于不兼容的版本
-            alvr_events::send_event(EventType::ClientFoundWrongVersion("v14 to v18".into()));
-
-            interrupt()
-        } else if &self.buffer[..5] == b"\x01ALVR" {
-            // People might still download the client from the polygraphene reposiory
-            alvr_events::send_event(EventType::ClientFoundWrongVersion("v11 or previous".into()));
+            warn!("Found old client. Upgrade");
 
             interrupt()
         } else {
