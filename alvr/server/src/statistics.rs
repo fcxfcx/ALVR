@@ -36,7 +36,6 @@ impl Default for HistoryFrame {
 pub struct StatisticsManager {
     history_buffer: VecDeque<HistoryFrame>, // 历史帧缓冲区，用于记录历史帧的信息
     max_history_size: usize,                // 最大历史帧缓存大小
-    nominal_server_frame_interval: Duration, // 服务器每帧的时长
     last_full_report_instant: Instant,      // 上一次完整的报告时间
     last_frame_present_instant: Instant,    // 上一帧图像呈现时间
     last_frame_present_interval: Duration,  // 上一帧图像呈现间隔时长
@@ -47,16 +46,20 @@ pub struct StatisticsManager {
     packets_lost_total: usize,              //丢包总数
     packets_lost_partial_sum: usize,        //丢包部分求和
     battery_gauges: HashMap<u64, f32>,      //电池电量表，用于存储设备ID和对应的电量值
-    game_render_latency_average: SlidingWindowAverage<Duration>, // 游戏渲染延迟平均值，使用滑动窗口进行计算
+    steamvr_pipeline_latency: Duration,
+    total_pipeline_latency_average: SlidingWindowAverage<Duration>,
 }
 
 impl StatisticsManager {
     // history size used to calculate average total pipeline latency
-    pub fn new(history_size: usize, nominal_server_frame_interval: Duration) -> Self {
+    pub fn new(
+        max_history_size: usize,
+        nominal_server_frame_interval: Duration,
+        steamvr_pipeline_frames: f32,
+    ) -> Self {
         Self {
             history_buffer: VecDeque::new(), // 历史帧缓冲区，用于记录历史帧的信息
             max_history_size: history_size,  // 最大历史帧缓存大小
-            nominal_server_frame_interval,   // 服务器每帧的时长
             last_full_report_instant: Instant::now(), // 上一次完整的报告时间
             last_frame_present_instant: Instant::now(), // 上一帧图像呈现时间
             last_frame_present_interval: Duration::ZERO, // 上一帧图像呈现间隔时长
@@ -67,7 +70,13 @@ impl StatisticsManager {
             packets_lost_total: 0,           //丢包总数
             packets_lost_partial_sum: 0,     //丢包部分求和
             battery_gauges: HashMap::new(),  //电池电量表，用于存储设备ID和对应的电量值
-            game_render_latency_average: SlidingWindowAverage::new(Duration::ZERO, history_size), // 游戏渲染延迟平均值，使用滑动窗口进行计算
+            steamvr_pipeline_latency: Duration::from_secs_f32(
+                steamvr_pipeline_frames * nominal_server_frame_interval.as_secs_f32(),
+            ),
+            total_pipeline_latency_average: SlidingWindowAverage::new(
+                Duration::ZERO,
+                max_history_size,
+            ),
         }
     }
 
@@ -166,10 +175,6 @@ impl StatisticsManager {
             let game_time_latency = frame
                 .frame_present
                 .saturating_duration_since(frame.tracking_received);
-
-            //将游戏渲染延迟时间加入游戏渲染延迟时间平均值的样本中
-            self.game_render_latency_average
-                .submit_sample(game_time_latency);
 
             //计算出服务器合成延迟时间
             let server_compositor_latency = frame
@@ -281,9 +286,9 @@ impl StatisticsManager {
         }
     }
 
-    // Used for controllers/trackers prediction calculation. The head prediction uses a different
-    // pathway
-    pub fn get_server_prediction_average(&self) -> Duration {
-        self.game_render_latency_average.get_average() + self.nominal_server_frame_interval
+    pub fn tracker_pose_time_offset(&self) -> Duration {
+        // This is the opposite of the client's StatisticsManager::tracker_prediction_offset().
+        self.steamvr_pipeline_latency
+            .saturating_sub(self.total_pipeline_latency_average.get_average())
     }
 }

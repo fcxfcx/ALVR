@@ -33,7 +33,7 @@ use alvr_events::EventType;
 use alvr_filesystem::{self as afs, Layout};
 use alvr_server_data::ServerDataManager;
 use alvr_session::CodecType;
-use alvr_sockets::{ClientListAction, Haptics, ServerControlPacket};
+use alvr_sockets::{ClientListAction, DecoderInitializationConfig, Haptics, ServerControlPacket};
 use bitrate::BitrateManager;
 use statistics::StatisticsManager;
 use std::{
@@ -115,7 +115,8 @@ static RGBTOYUV420_SHADER_COMP_SPV: &[u8] =
 
 static IS_ALIVE: Lazy<Arc<RelaxedAtomic>> = Lazy::new(|| Arc::new(RelaxedAtomic::new(false)));
 
-static DECODER_CONFIG: Lazy<Mutex<Option<Vec<u8>>>> = Lazy::new(|| Mutex::new(None));
+static DECODER_CONFIG: Lazy<Mutex<Option<DecoderInitializationConfig>>> =
+    Lazy::new(|| Mutex::new(None));
 
 pub enum WindowType {
     Alcro(alcro::UI),
@@ -144,7 +145,7 @@ pub fn create_recording_file() {
     match File::create(path) {
         Ok(mut file) => {
             if let Some(config) = &*DECODER_CONFIG.lock() {
-                file.write_all(config).ok();
+                file.write_all(&config.config_buffer).ok();
             }
 
             *VIDEO_RECORDING_FILE.lock() = Some(file);
@@ -313,7 +314,13 @@ pub unsafe extern "C" fn HmdDriverFactory(
         }
     }
 
-    extern "C" fn initialize_decoder(buffer_ptr: *const u8, len: i32) {
+    extern "C" fn initialize_decoder(buffer_ptr: *const u8, len: i32, codec: i32) {
+        let codec = if codec == 0 {
+            CodecType::H264
+        } else {
+            CodecType::Hevc
+        };
+
         let mut config_buffer = vec![0; len as usize];
 
         unsafe { ptr::copy_nonoverlapping(buffer_ptr, config_buffer.as_mut_ptr(), len as usize) };
@@ -326,7 +333,10 @@ pub unsafe extern "C" fn HmdDriverFactory(
             file.write_all(&config_buffer).ok();
         }
 
-        *DECODER_CONFIG.lock() = Some(config_buffer);
+        *DECODER_CONFIG.lock() = Some(DecoderInitializationConfig {
+            codec,
+            config_buffer,
+        });
     }
 
     // 用 "C" 语言的方式导出函数
@@ -406,7 +416,7 @@ pub unsafe extern "C" fn HmdDriverFactory(
                 let mut deadline = Instant::now();
 
                 while IS_ALIVE.value() {
-                    unsafe { crate::SendVSync(frame_interval.as_secs_f32()) };
+                    unsafe { crate::SendVSync() };
 
                     while let Ok(interval) = frame_interval_receiver.try_recv() {
                         frame_interval = interval;

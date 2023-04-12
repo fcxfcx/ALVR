@@ -199,18 +199,8 @@ pub enum BitrateMode {
 }
 
 #[derive(SettingsSchema, Serialize, Deserialize, Clone)]
-pub struct BitrateConfig {
-    pub mode: BitrateMode,
 
-    //重新设置帧率的阈值
-    #[schema(gui(slider(min = 0.01, max = 2.0, step = 0.01)))]
-    pub framerate_reset_threshold_multiplier: f32,
-
-    //最大网络延迟
-    #[schema(strings(display_name = "Maximum network latency"))]
-    #[schema(gui(slider(min = 1, max = 50)), suffix = "ms")]
-    pub max_network_latency_ms: Switch<u64>,
-
+pub struct DecoderLatencyFixer {
     //最大解码延迟
     #[schema(strings(
         display_name = "Maximum decoder latency",
@@ -233,6 +223,23 @@ pub struct BitrateConfig {
     ))]
     #[schema(gui(slider(min = 0.5, max = 1.0)))]
     pub decoder_latency_overstep_multiplier: f32,
+}
+
+#[derive(SettingsSchema, Serialize, Deserialize, Clone)]
+pub struct BitrateConfig {
+    pub mode: BitrateMode,
+
+    #[schema(gui(slider(min = 0.01, max = 2.0, step = 0.01)))]
+    pub framerate_reset_threshold_multiplier: f32,
+
+    #[schema(strings(display_name = "Maximum network latency"))]
+    #[schema(gui(slider(min = 1, max = 50)), suffix = "ms")]
+    pub max_network_latency_ms: Switch<u64>,
+
+    #[schema(strings(
+        help = "Currently there is a bug where the decoder latency keeps rising when above a certain bitrate"
+    ))]
+    pub decoder_latency_fixer: Switch<DecoderLatencyFixer>,
 }
 
 #[repr(u8)]
@@ -307,9 +314,9 @@ pub struct ColorCorrectionDesc {
 #[schema(gui = "button_group")]
 pub enum CodecType {
     #[schema(strings(display_name = "h264"))]
-    H264,
+    H264 = 0,
     #[schema(strings(display_name = "HEVC"))]
-    Hevc,
+    Hevc = 1,
 }
 
 #[derive(SettingsSchema, Serialize, Deserialize, Clone)]
@@ -553,11 +560,13 @@ pub struct ControllersDesc {
     pub extra_openvr_props: Vec<OpenvrPropEntry>,
 
     #[schema(strings(
-        display_name = "Pose time offset",
-        help = "This controls how smooth the controllers should track"
+        display_name = "Prediction",
+        help = r"Higher values make the controllers track smoother.
+Technically, this is the time (counted in frames) between pose submitted to SteamVR and the corresponding virtual vsync happens.
+Currently this cannot be reliably estimated automatically. The correct value should be 2 but 3 is default for smoother tracking at the cost of slight lag."
     ))]
-    #[schema(gui(slider(min = -1000, max = 1000, logarithmic)), suffix = "ms")]
-    pub pose_time_offset_ms: i64,
+    #[schema(gui(slider(min = 1.0, max = 10.0, logarithmic)), suffix = "frames")]
+    pub steamvr_pipeline_frames: f32,
 
     // note: logarithmic scale seems to be glitchy for this control
     #[schema(gui(slider(min = 0.0, max = 1.0, step = 0.01)), suffix = "m/s")]
@@ -864,10 +873,15 @@ pub fn session_settings_default() -> SettingsDefault {
                     enabled: false,
                     content: 8, //最大网络延迟
                 },
-                max_decoder_latency_ms: 15,
-                ///最大解码延迟
-                decoder_latency_overstep_frames: 15, //解码延迟超过设定的帧（15）
-                decoder_latency_overstep_multiplier: 0.99, //解码延迟超过设定的倍数（0.99）
+                decoder_latency_fixer: SwitchDefault {
+                    enabled: true,
+                    content: DecoderLatencyFixerDefault {
+                        max_decoder_latency_ms: 20,
+                        ///最大解码延迟（20）
+                        decoder_latency_overstep_frames: 30, //解码延迟超过设定的帧（30）
+                        decoder_latency_overstep_multiplier: 0.99, //解码延迟超过设定的倍数（0.99）
+                    },
+                },
             },
             advanced_codec_options: AdvancedCodecOptionsDefault {
                 nvenc_overrides: NvencOverridesDefault {
@@ -1013,7 +1027,7 @@ pub fn session_settings_default() -> SettingsDefault {
                         variant: ControllersEmulationModeDefaultVariant::Quest2Touch,
                     },
                     extra_openvr_props: default_custom_openvr_props,
-                    pose_time_offset_ms: 20,
+                    steamvr_pipeline_frames: 3.0,
                     linear_velocity_cutoff: 0.05,
                     angular_velocity_cutoff: 10.0,
                     left_controller_position_offset: [0.0, 0.0, -0.11],

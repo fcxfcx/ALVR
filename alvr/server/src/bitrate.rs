@@ -112,28 +112,29 @@ impl BitrateManager {
             }
         }
 
-        //如果解码延迟大于最大解码延迟
-        if decoder_latency > Duration::from_millis(self.config.max_decoder_latency_ms) {
-            //解码延迟超出次数+1
-            self.decoder_latency_overstep_count += 1;
+        if let Switch::Enabled(config) = &self.config.decoder_latency_fixer {
+            //如果解码延迟大于最大解码延迟
+            if decoder_latency > Duration::from_millis(config.max_decoder_latency_ms) {
+                //解码延迟超出次数+1
+                self.decoder_latency_overstep_count += 1;
 
-            // 如果解码器延迟超限计数器等于指定的帧数，则更新最大码率并标记需要更新
-            if self.decoder_latency_overstep_count
-                == self.config.decoder_latency_overstep_frames as usize
-            {
-                //动态最大比特率=min（平均值，动态最大比特率）*解码延迟超限系数
-                self.dynamic_max_bitrate =
-                    f32::min(self.bitrate_average.get_average(), self.dynamic_max_bitrate)
-                        * self.config.decoder_latency_overstep_multiplier;
+                // 如果解码器延迟超限计数器等于指定的帧数，则更新最大码率并标记需要更新
+                if self.decoder_latency_overstep_count
+                    == config.decoder_latency_overstep_frames as usize
+                {
+                    //动态最大比特率=min（平均值，动态最大比特率）*解码延迟超限系数
+                    self.dynamic_max_bitrate =
+                        f32::min(self.bitrate_average.get_average(), self.dynamic_max_bitrate)
+                            * config.decoder_latency_overstep_multiplier;
+                    self.update_needed = true;
 
-                self.update_needed = true;
-
-                //重置解码延迟超限计数器
+                    //重置解码延迟超限计数器
+                    self.decoder_latency_overstep_count = 0;
+                }
+            } else {
+                // 如果解码器延迟没有超过最大延迟值，重置解码器延迟超限计数器
                 self.decoder_latency_overstep_count = 0;
             }
-        } else {
-            // 如果解码器延迟没有超过最大延迟值，重置解码器延迟超限计数器
-            self.decoder_latency_overstep_count = 0;
         }
     }
 

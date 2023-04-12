@@ -106,7 +106,7 @@ extern "C" void (*LogInfo)(const char *stringPtr);
 extern "C" void (*LogDebug)(const char *stringPtr);
 extern "C" void (*LogPeriodically)(const char *tag, const char *stringPtr);
 extern "C" void (*DriverReadyIdle)(bool setDefaultChaprone);
-extern "C" void (*InitializeDecoder)(const unsigned char *configBuffer, int len);
+extern "C" void (*InitializeDecoder)(const unsigned char *configBuffer, int len, int codec);
 extern "C" void (*VideoSend)(unsigned long long targetTimestampNs, unsigned char *buf, int len);
 extern "C" void (*HapticsSend)(unsigned long long path,
                                float duration_s,
@@ -124,7 +124,7 @@ extern "C" void (*SetOpenvrProps)(unsigned long long deviceID);
 extern "C" void *CppEntryPoint(const char *pInterfaceName, int *pReturnCode);
 extern "C" void InitializeStreaming();
 extern "C" void DeinitializeStreaming();
-extern "C" void SendVSync(float frameIntervalS);
+extern "C" void SendVSync();
 extern "C" void RequestIDR();
 extern "C" void SetTracking(unsigned long long targetTimestampNs,
                             float controllerPoseTimeOffsetS,

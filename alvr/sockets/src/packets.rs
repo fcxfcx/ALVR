@@ -3,7 +3,7 @@ use alvr_common::{
     Fov, LogSeverity,
 };
 use alvr_events::{ButtonValue, LogEvent};
-use alvr_session::SessionDesc;
+use alvr_session::{CodecType, SessionDesc};
 use serde::{Deserialize, Serialize};
 use std::{
     fmt::{self, Debug},
@@ -44,11 +44,17 @@ pub struct StreamConfigPacket {
     pub game_audio_sample_rate: u32,
 }
 
+#[derive(Serialize, Deserialize, Clone)]
+pub struct DecoderInitializationConfig {
+    pub codec: CodecType,
+    pub config_buffer: Vec<u8>, // e.g. SPS + PPS NALs
+}
+
 #[derive(Serialize, Deserialize)]
 pub enum ServerControlPacket {
     // 用于表示服务器控制的数据包，列出了一些包类型
     StartStream,
-    InitializeDecoder { config_buffer: Vec<u8> },
+    InitializeDecoder(DecoderInitializationConfig),
     Restarting,
     KeepAlive,
     ServerPredictionAverage(Duration),

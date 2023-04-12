@@ -239,6 +239,12 @@ async fn stream_pipeline(
 
     *STATISTICS_MANAGER.lock() = Some(StatisticsManager::new(
         settings.connection.statistics_history_size as _,
+        Duration::from_secs_f32(1.0 / stream_config.fps),
+        if let Switch::Enabled(config) = settings.headset.controllers {
+            config.steamvr_pipeline_frames
+        } else {
+            0.0
+        },
     ));
 
     // StreamSocketBuilder对象里面包含流端口号、协议是TCP/UDP、发送接收的buf字节数
@@ -286,7 +292,6 @@ async fn stream_pipeline(
     {
         let config = &mut *DECODER_INIT_CONFIG.lock();
 
-        config.codec = settings.video.codec;
         config.max_buffering_frames = settings.video.max_buffering_frames;
         config.buffering_history_weight = settings.video.buffering_history_weight;
         config.options = settings
@@ -553,18 +558,13 @@ async fn stream_pipeline(
     let control_receive_loop = async move {
         loop {
             match control_receiver.recv().await {
-                Ok(ServerControlPacket::InitializeDecoder { config_buffer }) => {
-                    decoder::create_decoder(config_buffer);
+                Ok(ServerControlPacket::InitializeDecoder(config)) => {
+                    decoder::create_decoder(config);
                 }
                 Ok(ServerControlPacket::Restarting) => {
                     info!("{SERVER_RESTART_MESSAGE}");
                     set_hud_message(SERVER_RESTART_MESSAGE);
                     break Ok(());
-                }
-                Ok(ServerControlPacket::ServerPredictionAverage(interval)) => {
-                    if let Some(stats) = &mut *STATISTICS_MANAGER.lock() {
-                        stats.report_server_prediction_average(interval);
-                    }
                 }
                 Ok(_) => (),
                 Err(e) => {
