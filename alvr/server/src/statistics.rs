@@ -59,7 +59,7 @@ impl StatisticsManager {
     ) -> Self {
         Self {
             history_buffer: VecDeque::new(), // 历史帧缓冲区，用于记录历史帧的信息
-            max_history_size: history_size,  // 最大历史帧缓存大小
+            max_history_size,                // 最大历史帧缓存大小
             last_full_report_instant: Instant::now(), // 上一次完整的报告时间
             last_frame_present_instant: Instant::now(), // 上一帧图像呈现时间
             last_frame_present_interval: Duration::ZERO, // 上一帧图像呈现间隔时长
