@@ -147,7 +147,7 @@ impl eframe::App for Dashboard {
                             self.logs_tab.update_settings(&settings);
                             self.notification_bar.update_settings(&settings);
                             if self.just_opened {
-                                if settings.extra.open_setup_wizard {
+                                if settings.open_setup_wizard {
                                     self.setup_wizard_open = true;
                                 }
 
@@ -194,7 +194,7 @@ impl eframe::App for Dashboard {
                 // todo: find a way to center both vertically and horizontally
                 ui.vertical_centered(|ui| {
                     ui.add_space(100.0);
-                    ui.heading(RichText::new("StreamVR is restarting").size(30.0));
+                    ui.heading(RichText::new("SteamVR is restarting").size(30.0));
                 });
             });
 

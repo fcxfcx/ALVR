@@ -39,7 +39,6 @@ use tokio::{
     time,
 };
 
-// 重试连接的最小间隔，设定为1s
 const RETRY_CONNECT_MIN_INTERVAL: Duration = Duration::from_secs(1);
 
 static CONNECTED_CLIENT_HOSTNAMES: Lazy<parking_lot::Mutex<HashSet<String>>> =
@@ -53,20 +52,16 @@ fn align32(value: f32) -> u32 {
 
 // Alternate connection trials with manual IPs and clients discovered on the local network
 pub fn handshake_loop(frame_interval_sender: smpsc::Sender<Duration>) -> IntResult {
-    // 构造一个 WelcomeSocket
     let mut welcome_socket = WelcomeSocket::new().map_err(to_int_e!())?;
 
     loop {
-        // IS_ALIVE表示driver配置好了
         check_interrupt!(IS_ALIVE.value());
 
-        // 从ServerDataManager中获取client_list，处理手动添加的client
         let manual_client_ips = {
             let connected_hostnames_lock = CONNECTED_CLIENT_HOSTNAMES.lock();
             let mut manual_client_ips = HashMap::new();
             for (hostname, connection_info) in SERVER_DATA_MANAGER.read().client_list() {
                 if !connected_hostnames_lock.contains(hostname) {
-                    // 添加未连接的client的ip和hostname
                     for ip in &connection_info.manual_ips {
                         manual_client_ips.insert(*ip, hostname.clone());
                     }
@@ -78,12 +73,10 @@ pub fn handshake_loop(frame_interval_sender: smpsc::Sender<Duration>) -> IntResu
         if !manual_client_ips.is_empty()
             && try_connect(manual_client_ips, frame_interval_sender.clone()).is_ok()
         {
-            // 如果手动添加的client列表不为空，且连接成功，则1s后到下一次循环
             thread::sleep(RETRY_CONNECT_MIN_INTERVAL);
             continue;
         }
 
-        // 处理自动发现的client
         let discovery_config = SERVER_DATA_MANAGER
             .read()
             .settings()
@@ -92,13 +85,12 @@ pub fn handshake_loop(frame_interval_sender: smpsc::Sender<Duration>) -> IntResu
             .clone();
         if let Switch::Enabled(config) = discovery_config {
             let (client_hostname, client_ip) = match welcome_socket.recv_non_blocking() {
-                // 接收新的client连接并返回hostname和ip
                 Ok(pair) => pair,
                 Err(e) => {
                     if let InterruptibleError::Other(e) = e {
                         warn!("UDP handshake listening error: {e}");
                     }
-                    // 对于其他错误，1s后重试
+
                     thread::sleep(RETRY_CONNECT_MIN_INTERVAL);
                     continue;
                 }
@@ -115,13 +107,11 @@ pub fn handshake_loop(frame_interval_sender: smpsc::Sender<Duration>) -> IntResu
                     },
                 );
 
-                // 查看是否配置为自动信任client，如果是需要更新client_list并设置trusted为true
                 if config.auto_trust_clients {
                     data_manager
                         .update_client_list(client_hostname.clone(), ClientListAction::Trust);
                 }
 
-                // 确认client是否被信任
                 data_manager
                     .client_list()
                     .get(&client_hostname)
@@ -130,7 +120,6 @@ pub fn handshake_loop(frame_interval_sender: smpsc::Sender<Duration>) -> IntResu
             };
 
             // do not attempt connection if the client is already connected
-            // 对于已经信任且连接的client，尝试连接
             if trusted && !CONNECTED_CLIENT_HOSTNAMES.lock().contains(&client_hostname) {
                 if let Err(e) = try_connect(
                     [(client_ip, client_hostname.clone())].into_iter().collect(),
@@ -153,13 +142,10 @@ fn try_connect(
 
     let (mut proto_socket, client_ip) = runtime
         .block_on(async {
-            // 作为发起连接的一方去连接
-            // 这个方法虽然接收的是一个Hashmap，只会返回第一个连接成功的socket
             let get_proto_socket = ProtoControlSocket::connect_to(PeerType::AnyClient(
                 client_ips.keys().cloned().collect(),
             ));
             tokio::select! {
-                // 如果1s内连接成功，则返回连接的socket和client_ip，否则就认为连接失败
                 proto_socket = get_proto_socket => proto_socket,
                 _ = time::sleep(Duration::from_secs(1)) => {
                     fmt_e!("Control socket failed to connect")
@@ -169,16 +155,13 @@ fn try_connect(
         .map_err(to_int_e!())?;
 
     // Safety: this never panics because client_ip is picked from client_ips keys
-    // 连接成功的socket，会被从client_ips中移除
     let client_hostname = client_ips.remove(&client_ip).unwrap();
 
-    // 把连接成功的client的hostname加入到ServerDataManager的connected_client_hostnames中
     SERVER_DATA_MANAGER.write().update_client_list(
         client_hostname.clone(),
         ClientListAction::UpdateCurrentIp(Some(client_ip)),
     );
 
-    // 尝试去接收StreamingCapabilities和display name，注意proto_socket.recv()返回的是一个结构体（反序列化得来的）
     let maybe_streaming_caps = if let ClientConnectionResult::ConnectionAccepted {
         display_name,
         streaming_capabilities,
@@ -186,22 +169,18 @@ fn try_connect(
     } = runtime.block_on(proto_socket.recv()).map_err(to_int_e!())?
     {
         SERVER_DATA_MANAGER.write().update_client_list(
-            // client_list是一个哈希表，通过hostname作为key，找到的value都是ClientConnectionDecs结构体
-            // 这里去更新ClientConnectionDecs结构体中的display_name属性
             client_hostname.clone(),
             ClientListAction::SetDisplayName(display_name),
         );
 
         streaming_capabilities
     } else {
-        // 没收到说明连接处于standby状态，直接返回
         debug!("Found client in standby. Retrying");
         return Ok(());
     };
 
     let streaming_caps = if let Some(streaming_caps) = maybe_streaming_caps {
         if let Some(hostname) = &*STREAMING_CLIENT_HOSTNAME.lock() {
-            // 如果已经有一个StreamingClient连接了，就返回错误
             return int_fmt_e!("Streaming client {hostname} is already connected!");
         } else {
             streaming_caps
@@ -213,8 +192,6 @@ fn try_connect(
     let settings = SERVER_DATA_MANAGER.read().settings().clone();
 
     fn get_view_res(config: FrameSize, default_res: UVec2) -> UVec2 {
-        // 配置streaming的分辨率，可以是相对于默认分辨率的比例，也可以是绝对的分辨率
-        // 默认的分辨率是对应Quest的2880x1600，默认的scale是0.75
         let res = match config {
             FrameSize::Scale(scale) => default_res.as_vec2() * scale,
             FrameSize::Absolute { width, height } => {
@@ -242,7 +219,6 @@ fn try_connect(
         streaming_caps.default_view_resolution,
     );
 
-    // 配置streaming的fps（默认是72）
     let fps = {
         let mut best_match = 0_f32;
         let mut min_diff = f32::MAX;
@@ -256,7 +232,6 @@ fn try_connect(
         best_match
     };
 
-    // 判断fps是否在支持的范围内
     if !streaming_caps
         .supported_refresh_rates
         .contains(&settings.video.preferred_fps)
@@ -264,7 +239,6 @@ fn try_connect(
         warn!("Chosen refresh rate not supported. Using {fps}Hz");
     }
 
-    // 音频相关的配置
     let game_audio_sample_rate = if let Switch::Enabled(game_audio_config) =
         settings.audio.game_audio
     {
@@ -293,7 +267,6 @@ fn try_connect(
         0
     };
 
-    // 把串流的配置信息发送给client（注意现在还是在try_connect()函数中）
     let client_config = StreamConfigPacket {
         session_desc: {
             let session = SERVER_DATA_MANAGER.read().session().clone();
@@ -307,11 +280,8 @@ fn try_connect(
         .block_on(proto_socket.send(&client_config))
         .map_err(to_int_e!())?;
 
-    // 把原始的proto_socket分成两个，一个用于接收数据，一个用于发送数据
-    // 用来传输控制数据，这里转换为了ControlSocket里面的Sender和Receiver
     let (mut control_sender, control_receiver) = proto_socket.split();
 
-    // 从setting里读取配置信息，配置controller参数
     let mut controllers_mode_idx = 0;
     let mut override_trigger_threshold = false;
     let mut trigger_threshold = 0.0;
@@ -326,14 +296,14 @@ fn try_connect(
             ControllersEmulationMode::ViveTracker => 9,
         };
         override_trigger_threshold =
-            if let Switch::Enabled(config) = config.override_trigger_threshold {
-                trigger_threshold = config.trigger_threshold;
+            if let Switch::Enabled(value) = config.trigger_threshold_override {
+                trigger_threshold = value;
                 true
             } else {
                 false
             };
-        override_grip_threshold = if let Switch::Enabled(config) = config.override_grip_threshold {
-            grip_threshold = config.grip_threshold;
+        override_grip_threshold = if let Switch::Enabled(value) = config.grip_threshold_override {
+            grip_threshold = value;
             true
         } else {
             false
@@ -343,7 +313,6 @@ fn try_connect(
         false
     };
 
-    // 配置视野集中渲染参数
     let mut foveation_center_size_x = 0.0;
     let mut foveation_center_size_y = 0.0;
     let mut foveation_center_shift_x = 0.0;
@@ -364,7 +333,6 @@ fn try_connect(
             false
         };
 
-    // 配置色彩校正参数
     let mut brightness = 0.0;
     let mut contrast = 0.0;
     let mut saturation = 0.0;
@@ -381,10 +349,9 @@ fn try_connect(
         false
     };
 
-    let nvenc_overrides = settings.video.advanced_codec_options.nvenc_overrides;
-    let amf_controls = settings.video.advanced_codec_options.amf_controls;
+    let nvenc_overrides = settings.video.encoder_config.nvenc;
+    let amf_controls = settings.video.encoder_config.amf;
 
-    // 配置OpenVR需要的参数
     let new_openvr_config = OpenvrConfig {
         eye_resolution_width: stream_view_resolution.x,
         eye_resolution_height: stream_view_resolution.y,
@@ -394,20 +361,24 @@ fn try_connect(
         enable_vive_tracker_proxy: settings.headset.enable_vive_tracker_proxy,
         aggressive_keyframe_resend: settings.connection.aggressive_keyframe_resend,
         adapter_index: settings.video.adapter_index,
-        codec: matches!(settings.video.codec, CodecType::Hevc) as _,
-        rate_control_mode: settings.video.rate_control_mode as u32,
-        filler_data: settings.video.filler_data,
-        entropy_coding: settings.video.entropy_coding as u32,
+        codec: matches!(settings.video.preferred_codec, CodecType::Hevc) as _,
+        rate_control_mode: settings.video.encoder_config.rate_control_mode as u32,
+        filler_data: settings.video.encoder_config.filler_data,
+        entropy_coding: settings.video.encoder_config.entropy_coding as u32,
         refresh_rate: fps as _,
-        use_10bit_encoder: settings.video.use_10bit_encoder,
+        use_10bit_encoder: settings.video.encoder_config.use_10bit,
         enable_vbaq: amf_controls.enable_vbaq,
         use_preproc: amf_controls.use_preproc,
         preproc_sigma: amf_controls.preproc_sigma,
         preproc_tor: amf_controls.preproc_tor,
-        nvenc_quality_preset: nvenc_overrides.nvenc_quality_preset as u32,
-        amd_encoder_quality_preset: amf_controls.amd_encoder_quality_preset as u32,
-        force_sw_encoding: settings.video.force_sw_encoding,
-        sw_thread_count: settings.video.sw_thread_count,
+        nvenc_quality_preset: nvenc_overrides.quality_preset as u32,
+        amd_encoder_quality_preset: amf_controls.quality_preset as u32,
+        force_sw_encoding: settings
+            .video
+            .encoder_config
+            .software
+            .force_software_encoding,
+        sw_thread_count: settings.video.encoder_config.software.thread_count,
         controllers_enabled,
         controllers_mode_idx,
         override_trigger_threshold,
@@ -427,7 +398,7 @@ fn try_connect(
         saturation,
         gamma,
         sharpening,
-        linux_async_reprojection: settings.extra.patches.linux_async_reprojection,
+        linux_async_reprojection: settings.patches.linux_async_reprojection,
         nvenc_tuning_preset: nvenc_overrides.tuning_preset as u32,
         nvenc_multi_pass: nvenc_overrides.multi_pass as u32,
         nvenc_adaptive_quantization_mode: nvenc_overrides.adaptive_quantization_mode as u32,
@@ -445,10 +416,9 @@ fn try_connect(
         rc_max_bitrate: nvenc_overrides.rc_max_bitrate,
         rc_average_bitrate: nvenc_overrides.rc_average_bitrate,
         nvenc_enable_weighted_prediction: nvenc_overrides.enable_weighted_prediction,
-        capture_frame_dir: settings.extra.capture_frame_dir,
+        capture_frame_dir: settings.capture.capture_frame_dir,
     };
 
-    // 如果从客户端收到的配置与当前ServerData里的配置不同，则更新配置并重启Driver
     if SERVER_DATA_MANAGER.read().session().openvr_config != new_openvr_config {
         SERVER_DATA_MANAGER.write().session_mut().openvr_config = new_openvr_config;
 
@@ -459,7 +429,6 @@ fn try_connect(
         crate::notify_restart_driver();
     }
 
-    // 连接完毕，存放到已连接的客户端列表中
     CONNECTED_CLIENT_HOSTNAMES
         .lock()
         .insert(client_hostname.clone());
@@ -471,7 +440,6 @@ fn try_connect(
             let client_hostname = client_hostname.clone();
             async move {
                 // this is a bridge between sync and async, skips the needs for a notifier
-                // 搞一个异步任务，每秒检查一次OpenVR Runtime是否还在运行
                 let shutdown_detector = async {
                     while IS_ALIVE.value() {
                         time::sleep(Duration::from_secs(1)).await;
@@ -515,7 +483,6 @@ fn try_connect(
 struct StreamCloseGuard(Arc<RelaxedAtomic>);
 
 impl Drop for StreamCloseGuard {
-    // 负责关闭流
     fn drop(&mut self) {
         self.0.set(false);
 
@@ -541,7 +508,6 @@ impl Drop for StreamCloseGuard {
     }
 }
 
-// 该方法负责开启所有流的处理loop
 async fn connection_pipeline(
     client_hostname: String,
     client_ip: IpAddr,
@@ -553,14 +519,12 @@ async fn connection_pipeline(
 ) -> StrResult {
     let control_sender = Arc::new(Mutex::new(control_sender));
 
-    // 向客户端发送StartStream包，等待客户端回复StreamReady包
     control_sender
         .lock()
         .await
         .send(&ServerControlPacket::StartStream)
         .await?;
 
-    // 需要收到客户端的StreamReady包，才能继续，否则会报错
     match control_receiver.recv().await {
         Ok(ClientControlPacket::StreamReady) => {}
         Ok(_) => {
@@ -573,7 +537,6 @@ async fn connection_pipeline(
 
     let settings = SERVER_DATA_MANAGER.read().settings().clone();
 
-    // 5s内开启StreamSocket，否则报错
     let stream_socket = tokio::select! {
         res = StreamSocketBuilder::connect_to_client(
             client_ip,
@@ -587,10 +550,8 @@ async fn connection_pipeline(
             return fmt_e!("Timeout while setting up streams");
         }
     };
-    // 将StreamSocket包装成Arc，以便在多个线程间共享，注意此时不能再修改StreamSocket的内容
     let stream_socket = Arc::new(stream_socket);
 
-    // 生成负责统计数据的模块
     *STATISTICS_MANAGER.lock() = Some(StatisticsManager::new(
         settings.connection.statistics_history_size as _,
         Duration::from_secs_f32(1.0 / refresh_rate),
@@ -601,25 +562,18 @@ async fn connection_pipeline(
         },
     ));
 
-    // 获取BITRATE_MANAGER的锁，并使用settings.video.bitrate和settings.connection.statistics_history_size作为参数来创建一个新的BitrateManager实例
-    // 在修改BITRATE_MANAGER实例之前，通过lock()方法获得了对它的锁定，以防止多个线程并发访问。
-    // BitrateManager的new方法有两个参数：所需的比特率和统计历史记录的大小。
-    // statistics_history_size字段被转换为usize类型，因为new方法的第二个参数是usize类型。
-    // 生成负责控制码率的模块
     *BITRATE_MANAGER.lock() = BitrateManager::new(
         settings.video.bitrate,
         settings.connection.statistics_history_size as _,
+        refresh_rate,
     );
 
     // todo: dynamic framerate
-    // frame_interval_sender是一个mpsc通道，从server的lib代码里构建并且一层层传进来，同时构建的消费者放在lib代码里
-    // mpsc: multiple producer, single consumer，多个生产者，单个消费者通道
     frame_interval_sender
         .send(Duration::from_secs_f32(1.0 / refresh_rate))
         .ok();
 
     {
-        // 如果有配置在连接时执行的脚本，则执行
         let on_connect_script = settings.connection.on_connect_script;
 
         if !on_connect_script.is_empty() {
@@ -633,24 +587,19 @@ async fn connection_pipeline(
         }
     }
 
-    // 检查是否开启了录制视频的功能，如果开启了需要保存视频
-    if settings.extra.save_video_stream {
+    if settings.capture.save_video_stream {
         crate::create_recording_file();
     }
 
     unsafe { crate::InitializeStreaming() };
 
     let is_streaming = Arc::new(RelaxedAtomic::new(true));
-    // 负责关闭流的guard
     let _stream_guard = StreamCloseGuard(Arc::clone(&is_streaming));
 
-    // 负责音频传输的部分
     let game_audio_loop: BoxFuture<_> = if let Switch::Enabled(config) = settings.audio.game_audio {
-        // 构造一个新的流，用于传输音频（音频流的id是2）
         let sender = stream_socket.request_stream(AUDIO).await?;
         Box::pin(async move {
             loop {
-                // 新建一个AudioDevice，用于获取音频数据（linux_backend在非linux系统上是None）
                 let device = match AudioDevice::new_output(
                     Some(settings.audio.linux_backend),
                     config.device.as_ref(),
@@ -705,8 +654,6 @@ async fn connection_pipeline(
     } else {
         Box::pin(future::pending())
     };
-
-    // 负责麦克风传输的部分
     let microphone_loop: BoxFuture<_> = if let Switch::Enabled(config) = settings.audio.microphone {
         #[allow(unused_variables)]
         let (sink, source) = AudioDevice::new_virtual_microphone_pair(
@@ -740,12 +687,9 @@ async fn connection_pipeline(
     };
 
     let video_send_loop = {
-        // VIDEO的流id是3
         let mut socket_sender = stream_socket.request_stream(VIDEO).await?;
         async move {
-            // 开启异步任务，用于从其他线程接收视频数据（还是通过mpsc），然后从socket_sender发送出去
             let (data_sender, mut data_receiver) = tmpsc::unbounded_channel();
-            // 保存data_sender，用于其他线程发送视频数据
             *VIDEO_SENDER.lock() = Some(data_sender);
 
             while let Some(VideoPacket { timestamp, payload }) = data_receiver.recv().await {
@@ -757,12 +701,10 @@ async fn connection_pipeline(
     };
 
     let haptics_send_loop = {
-        // HAPTICS的流id是1
         let mut socket_sender = stream_socket.request_stream(HAPTICS).await?;
         let controllers_desc = settings.headset.controllers.clone();
         async move {
             let (data_sender, mut data_receiver) = tmpsc::unbounded_channel();
-            // 配置HAPTICS的发送器，供其他线程使用
             *HAPTICS_SENDER.lock() = Some(data_sender);
 
             let haptics_manager = controllers_desc
@@ -770,9 +712,8 @@ async fn connection_pipeline(
                 .and_then(|c| c.haptics.into_option())
                 .map(HapticsManager::new);
 
-            // 还是一样，从data_receiver接收数据，然后走socket发送出去
             while let Some(haptics) = data_receiver.recv().await {
-                if settings.extra.log_haptics {
+                if settings.logging.log_haptics {
                     alvr_events::send_event(EventType::Haptics(HapticsEvent {
                         path: DEVICE_ID_TO_PATH
                             .get(&haptics.device_id)
@@ -811,9 +752,7 @@ async fn connection_pipeline(
 
     let tracking_manager = Arc::new(Mutex::new(TrackingManager::new(&settings.headset)));
 
-    // 负责空间位置追踪的部分
     let tracking_receive_loop = {
-        // TRACKING的流id是0
         let mut receiver = stream_socket
             .subscribe_to_stream::<Tracking>(TRACKING)
             .await?;
@@ -865,29 +804,19 @@ async fn connection_pipeline(
         }
     };
 
-    // 定义名为 `statistics_receive_loop` 的闭包，用于处理接收到的 `ClientStatistics` 数据流
-    // 创建一个异步的 `receiver`，用于订阅 `STATISTICS` 通道上的 `ClientStatistics` 数据流
-    // 并将结果赋值给 receiver 变量。若出错则返回错误并退出闭包
     let statistics_receive_loop = {
-        // STATISTICS的流id是4
         let mut receiver = stream_socket
             .subscribe_to_stream::<ClientStatistics>(STATISTICS)
-            .await?; // `await` 等待异步操作完成并返回结果
-                     // 创建一个异步闭包并返回，此闭包用于不断循环，从 receiver 中读取数据
+            .await?;
         async move {
             loop {
-                // 使用 recv_header_only 方法从 receiver 中读取一条 ClientStatistics 数据
-                // 若出错则返回错误并退出闭包
                 let client_stats = receiver.recv_header_only().await?;
-                // 检查 `STATISTICS_MANAGER` 中是否存在数据，若存在则进入语句块
+
                 if let Some(stats) = &mut *STATISTICS_MANAGER.lock() {
-                    // 从 `client_stats` 中获取目标时间戳和视频解码延迟信息
                     let timestamp = client_stats.target_timestamp;
                     let decoder_latency = client_stats.video_decode;
-                    // 将 `client_stats` 的信息传递给 `STATISTICS_MANAGER` 并获取网络延迟
                     let network_latency = stats.report_statistics(client_stats);
 
-                    // 将时间戳、网络延迟和解码延迟信息传递给 `BITRATE_MANAGER` 进行处理
                     BITRATE_MANAGER.lock().report_frame_latencies(
                         timestamp,
                         network_latency,
@@ -983,7 +912,7 @@ async fn connection_pipeline(
                     }
                 },
                 Ok(ClientControlPacket::Button { path_id, value }) => {
-                    if settings.extra.log_button_presses {
+                    if settings.logging.log_button_presses {
                         alvr_events::send_event(EventType::Button(ButtonEvent {
                             path: BUTTON_PATH_FROM_ID
                                 .get(&path_id)
@@ -1027,7 +956,6 @@ async fn connection_pipeline(
 
     tokio::select! {
         // Spawn new tasks and let the runtime manage threading
-        // 开启所有的loop任务，有任何一个loop任务结束，就会返回
         res = spawn_cancelable(receive_loop) => {
             if let Err(e) = res {
                 info!("Client disconnected. Cause: {e}" );
