@@ -67,7 +67,10 @@ static STATISTICS_MANAGER: Lazy<Mutex<Option<StatisticsManager>>> = Lazy::new(||
 static BITRATE_MANAGER: Lazy<Mutex<BitrateManager>> = Lazy::new(|| {
     let data_lock = SERVER_DATA_MANAGER.read();
     let settings = data_lock.settings();
+
+    // 创建一个新的互斥锁类型Mutex<BitrateManager>，并使用BitrateManager::new初始化其值
     Mutex::new(BitrateManager::new(
+        // 从setting中获取视频比特率设置，并复制到新的实例中
         settings.video.bitrate.clone(),
         settings.connection.statistics_history_size as usize,
         settings.video.preferred_fps,

@@ -587,6 +587,8 @@ async fn connection_pipeline(
         }
     }
 
+
+    // 检查是否开启了录制视频的功能，如果开启了需要保存视频
     if settings.capture.save_video_stream {
         crate::create_recording_file();
     }

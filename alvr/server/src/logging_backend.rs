@@ -44,6 +44,7 @@ pub fn init_logging(events_sender: Sender<Event>) {
                     .unwrap(),
             )
             .filter(|metadata| metadata.target() == "alvr_events");
+
     } else {
         // this sink is required to make sure all log gets processed and forwarded to the websocket
         if cfg!(target_os = "linux") {
