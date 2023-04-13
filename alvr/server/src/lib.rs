@@ -70,12 +70,13 @@ static STATISTICS_MANAGER: Lazy<Mutex<Option<StatisticsManager>>> = Lazy::new(||
 static BITRATE_MANAGER: Lazy<Mutex<BitrateManager>> = Lazy::new(|| {
     // 调用SERVER_DATA_MANAGER的read方法获取读锁
     let data_lock = SERVER_DATA_MANAGER.read();
+    let settings = data_lock.settings();
     // 创建一个新的互斥锁类型Mutex<BitrateManager>，并使用BitrateManager::new初始化其值
     Mutex::new(BitrateManager::new(
-        // 从data_lock中获取视频比特率设置，并复制到新的实例中
-        data_lock.settings().video.bitrate.clone(),
-        // 从data_lock中获取连接统计历史数据的长度，并转换为usize类型，作为新实例的初始化参数
-        data_lock.settings().connection.statistics_history_size as usize,
+        // 从setting中获取视频比特率设置，并复制到新的实例中
+        settings.video.bitrate.clone(),
+        settings.connection.statistics_history_size as usize,
+        settings.video.preferred_fps,
     ))
 });
 
@@ -133,7 +134,7 @@ fn to_ffi_quat(quat: Quat) -> FfiQuat {
 }
 
 pub fn create_recording_file() {
-    let codec = SERVER_DATA_MANAGER.read().settings().video.codec;
+    let codec = SERVER_DATA_MANAGER.read().settings().video.preferred_codec;
     let ext = if matches!(codec, CodecType::H264) {
         "h264"
     } else {
@@ -448,7 +449,7 @@ pub unsafe extern "C" fn HmdDriverFactory(
             );
         }
 
-        BITRATE_MANAGER.lock().report_frame_resent();
+        BITRATE_MANAGER.lock().report_frame_present();
     }
 
     extern "C" fn report_composed(timestamp_ns: u64, offset_ns: u64) {

@@ -11,6 +11,7 @@ const UPDATE_INTERVAL: Duration = Duration::from_secs(1);
 //定义一个bitratemanager结构体
 pub struct BitrateManager {
     config: BitrateConfig,                                   //新增：比特率配置
+    nominal_framerate: f32,                                  //新增：帧率
     max_history_size: usize,                                 //新增：历史最大值
     frame_interval_average: SlidingWindowAverage<Duration>,  //帧间隔平均值
     packet_sizes_bits_history: VecDeque<(Duration, usize)>,  //新增：历史包大小记录
@@ -24,10 +25,10 @@ pub struct BitrateManager {
 }
 
 impl BitrateManager {
-    //构造函数，创建一个实例
-    pub fn new(config: BitrateConfig, max_history_size: usize) -> Self {
+    pub fn new(config: BitrateConfig, max_history_size: usize, nominal_framerate: f32) -> Self {
         Self {
             config,
+            nominal_framerate,
             max_history_size,
             frame_interval_average: SlidingWindowAverage::new(
                 //对滑动窗口实例化，并把参数：帧间隔初始值16ms和历史最大值给 frame_interval_average
@@ -51,26 +52,29 @@ impl BitrateManager {
 
     // Note: This is used to calculate the framerate/frame interval. The frame present is the most
     // accurate event for this use.
-
     //计算帧间隔平均值
-    pub fn report_frame_resent(&mut self) {
-        let now = Instant::now(); //获取当前时间
+    pub fn report_frame_present(&mut self) {
+        let now = Instant::now();
 
         let interval = now - self.last_frame_instant; //间隔=当前-上一帧时刻
         self.last_frame_instant = now; //计算完后把上一帧的时刻设置为当前时间
 
-        // 如果帧间隔时间超过平均值=间隔/平均帧间隔
-        //If the latest frame interval deviates too much from the mean,
-        let interval_ratio =
-            interval.as_secs_f32() / self.frame_interval_average.get_average().as_secs_f32();
+        if let Switch::Enabled(config) = &self.config.adapt_to_framerate {
+            // 如果帧间隔时间超过平均值=间隔/平均帧间隔
+            //If the latest frame interval deviates too much from the mean,
+            let interval_ratio =
+                interval.as_secs_f32() / self.frame_interval_average.get_average().as_secs_f32();
 
-        self.frame_interval_average.submit_sample(interval);
-        //往存帧间隔的窗口传输样本值
+            //往存帧间隔的窗口传输样本值
+            self.frame_interval_average.submit_sample(interval);
 
-        if (interval_ratio - 1.0).abs() > self.config.framerate_reset_threshold_multiplier {
-            self.frame_interval_average =
-                SlidingWindowAverage::new(interval, self.max_history_size); //计算帧间隔平均值
-            self.update_needed = true; //更新
+            if interval_ratio > config.framerate_reset_threshold_multiplier
+                || interval_ratio < 1.0 / config.framerate_reset_threshold_multiplier
+            {
+                self.frame_interval_average =
+                    SlidingWindowAverage::new(interval, self.max_history_size);
+                self.update_needed = true;
+            }
         }
     }
 
@@ -112,20 +116,21 @@ impl BitrateManager {
             }
         }
 
-        if let Switch::Enabled(config) = &self.config.decoder_latency_fixer {
-            //如果解码延迟大于最大解码延迟
+        if let BitrateMode::Adaptive {
+            decoder_latency_fixer: Switch::Enabled(config),
+            ..
+        } = &self.config.mode
+        {
             if decoder_latency > Duration::from_millis(config.max_decoder_latency_ms) {
                 //解码延迟超出次数+1
                 self.decoder_latency_overstep_count += 1;
 
                 // 如果解码器延迟超限计数器等于指定的帧数，则更新最大码率并标记需要更新
-                if self.decoder_latency_overstep_count
-                    == config.decoder_latency_overstep_frames as usize
-                {
-                    //动态最大比特率=min（平均值，动态最大比特率）*解码延迟超限系数
+                if self.decoder_latency_overstep_count == config.latency_overstep_frames as usize {
+                    // 如果解码器延迟超限计数器等于指定的帧数，则更新最大码率并标记需要更新
                     self.dynamic_max_bitrate =
                         f32::min(self.bitrate_average.get_average(), self.dynamic_max_bitrate)
-                            * config.decoder_latency_overstep_multiplier;
+                            * config.latency_overstep_multiplier;
                     self.update_needed = true;
 
                     //重置解码延迟超限计数器
@@ -156,7 +161,7 @@ impl BitrateManager {
         }
 
         //计算比特率
-        let mut bitrate_bps = match &self.config.mode {
+        let bitrate_bps = match &self.config.mode {
             //如果使用恒定比特率模式
             BitrateMode::ConstantMbps(bitrate_mbps) => *bitrate_mbps as f32 * 1e6,
             //如果使用自适应比特率模式
@@ -164,6 +169,8 @@ impl BitrateManager {
                 saturation_multiplier,
                 max_bitrate_mbps,
                 min_bitrate_mbps,
+                max_network_latency_ms,
+                ..
             } => {
                 //计算平均比特率并乘以饱和度因子
                 let mut bitrate_bps = self.bitrate_average.get_average() * saturation_multiplier;
@@ -175,27 +182,31 @@ impl BitrateManager {
                 if let Switch::Enabled(min) = min_bitrate_mbps {
                     bitrate_bps = f32::max(bitrate_bps, *min as f32 * 1e6);
                 }
+                //如果指定了最大网络延迟，根据网络延迟和最大网络延迟计算比特率
+                if let Switch::Enabled(max_ms) = max_network_latency_ms {
+                    let multiplier = *max_ms as f32
+                        / 1000.0
+                        / self.network_latency_average.get_average().as_secs_f32();
+                    bitrate_bps = f32::min(bitrate_bps, bitrate_bps * multiplier);
+                }
+                //限制比特率不超过动态最大比特率
+                bitrate_bps = f32::min(bitrate_bps, self.dynamic_max_bitrate);
+
                 //返回计算出的比特率
                 bitrate_bps
             }
         };
-        //如果指定了最大网络延迟，根据网络延迟和最大网络延迟计算比特率
-        if let Switch::Enabled(max_ms) = &self.config.max_network_latency_ms {
-            let multiplier =
-                *max_ms as f32 / 1000.0 / self.network_latency_average.get_average().as_secs_f32();
-            bitrate_bps = f32::min(bitrate_bps, bitrate_bps * multiplier);
-        }
-
-        //限制比特率不超过动态最大比特率
-        bitrate_bps = f32::min(bitrate_bps, self.dynamic_max_bitrate);
 
         //计算帧率
-        let framerate = 1.0
-            / self
+        let framerate = if self.config.adapt_to_framerate.enabled() {
+            1.0 / self
                 .frame_interval_average
                 .get_average()
                 .as_secs_f32()
-                .min(1.0);
+                .min(1.0)
+        } else {
+            self.nominal_framerate
+        };
 
         //返回计算出的 FfiDynamicEncoderParams
         FfiDynamicEncoderParams {
