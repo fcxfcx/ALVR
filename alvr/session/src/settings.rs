@@ -10,7 +10,6 @@ include!(concat!(env!("OUT_DIR"), "/openvr_property_keys.rs"));
 #[derive(SettingsSchema, Serialize, Deserialize, Clone)]
 #[schema(gui = "button_group")]
 pub enum FrameSize {
-    //声明帧大小的枚举类型
     Scale(#[schema(gui(slider(min = 0.25, max = 2.0, step = 0.01)))] f32),
     Absolute {
         #[schema(gui(slider(min = 32, max = 0x1000, step = 32)))]
@@ -239,10 +238,7 @@ pub struct DecoderLatencyFixer {
 #[schema(gui = "button_group")]
 pub enum BitrateMode {
     #[schema(strings(display_name = "Constant"))]
-    //模式一：固定比特率
     ConstantMbps(#[schema(gui(slider(min = 5, max = 1000, logarithmic)), suffix = "Mbps")] u64),
-
-    //模式二：自适应比特率
     Adaptive {
         #[schema(strings(
             help = "Percentage of network bandwidth to allocate for video transmission"
@@ -270,7 +266,6 @@ pub enum BitrateMode {
 }
 
 #[derive(SettingsSchema, Serialize, Deserialize, Clone)]
-
 pub struct BitrateAdaptiveFramerateConfig {
     #[schema(strings(
         help = "If the framerate changes more than this factor, trigger a parameters update"
@@ -416,7 +411,7 @@ pub struct VideoDesc {
     pub mediacodec_extra_options: Vec<(String, MediacodecDataType)>, //高级编码选择
 
     #[schema(flag = "steamvr-restart")]
-    pub foveated_rendering: Switch<FoveatedRenderingDesc>, //注释点渲染
+    pub foveated_rendering: Switch<FoveatedRenderingDesc>,
 
     pub oculus_foveation_level: OculusFovetionLevel,
 
@@ -848,18 +843,28 @@ pub fn session_settings_default() -> SettingsDefault {
             buffering_history_weight: 0.90,
             bitrate: BitrateConfigDefault {
                 mode: BitrateModeDefault {
-                    //固定比特率
                     ConstantMbps: 30,
-                    //自适应比特率
                     Adaptive: BitrateModeAdaptiveDefault {
-                        saturation_multiplier: 0.95, //饱和系数
+                        saturation_multiplier: 0.95,
                         max_bitrate_mbps: SwitchDefault {
                             enabled: false,
-                            content: 100, //最大比特率
+                            content: 100,
                         },
                         min_bitrate_mbps: SwitchDefault {
                             enabled: false,
-                            content: 5, //最小比特率
+                            content: 5,
+                        },
+                        max_network_latency_ms: SwitchDefault {
+                            enabled: false,
+                            content: 8,
+                        },
+                        decoder_latency_fixer: SwitchDefault {
+                            enabled: true,
+                            content: DecoderLatencyFixerDefault {
+                                max_decoder_latency_ms: 20,
+                                latency_overstep_frames: 30,
+                                latency_overstep_multiplier: 0.99,
+                            },
                         },
                         max_network_latency_ms: SwitchDefault {
                             enabled: false,
@@ -874,7 +879,6 @@ pub fn session_settings_default() -> SettingsDefault {
                             },
                         },
                     },
-                    //可变化的
                     variant: BitrateModeDefaultVariant::Adaptive,
                 },
                 adapt_to_framerate: SwitchDefault {
@@ -1100,9 +1104,7 @@ pub fn session_settings_default() -> SettingsDefault {
             disconnection_criteria: SwitchDefault {
                 enabled: false,
                 content: DisconnectionCriteriaDefault {
-                    // 时延的阈值
                     latency_threshold_ms: 150,
-                    // 可能3秒后会发送断连指令？？？
                     sustain_duration_s: 3,
                 },
             },

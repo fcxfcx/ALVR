@@ -23,6 +23,17 @@ pub struct Statistics {
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
+pub struct TargetStatistics {
+    pub video_packets_total: usize,
+    pub video_packets_per_sec: usize,
+    pub video_mbytes_total: usize,
+    pub video_mbits_per_sec: f32,
+    pub network_latency_ms: f32,
+    pub encode_latency_ms: f32,
+    pub decode_latency_ms: f32,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, Default)]
 pub struct GraphStatistics {
     pub total_pipeline_latency_s: f32,
     pub game_time_s: f32,
@@ -73,6 +84,7 @@ pub enum EventType {
     Haptics(HapticsEvent),
     ServerRequestsSelfRestart,
     Log(LogEvent),
+    TargetStatistics(TargetStatistics),
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -82,5 +94,13 @@ pub struct Event {
 }
 
 pub fn send_event(event_type: EventType) {
-    info!("{}", serde_json::to_string(&event_type).unwrap());
+    // only send the data we want to the log file
+    match event_type {
+        EventType::TargetStatistics(_) => {
+            info!("{}", serde_json::to_string(&event_type).unwrap());
+        }
+        _ => {
+            return;
+        }
+    }
 }

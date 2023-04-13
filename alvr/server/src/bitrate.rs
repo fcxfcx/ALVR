@@ -8,7 +8,6 @@ use std::{
 
 const UPDATE_INTERVAL: Duration = Duration::from_secs(1);
 
-//定义一个bitratemanager结构体
 pub struct BitrateManager {
     config: BitrateConfig,                                   //新增：比特率配置
     nominal_framerate: f32,                                  //新增：帧率
@@ -31,22 +30,20 @@ impl BitrateManager {
             nominal_framerate,
             max_history_size,
             frame_interval_average: SlidingWindowAverage::new(
-                //对滑动窗口实例化，并把参数：帧间隔初始值16ms和历史最大值给 frame_interval_average
                 Duration::from_millis(16),
                 max_history_size,
             ),
             packet_sizes_bits_history: VecDeque::new(),
             network_latency_average: SlidingWindowAverage::new(
-                //对滑动窗口实例化，并把参数：网络延迟初始值5ms和历史最大值给 network_latency_average
                 Duration::from_millis(5),
                 max_history_size,
             ),
-            bitrate_average: SlidingWindowAverage::new(30_000_000.0, max_history_size), //对滑动窗口实例化，并把参数：比特率初始值30和历史最大值给 bitrate_average
+            bitrate_average: SlidingWindowAverage::new(30_000_000.0, max_history_size),
             decoder_latency_overstep_count: 0,
-            last_frame_instant: Instant::now(), //获取当前时间并把参数传给last_frame_instant
-            last_update_instant: Instant::now(), //获取当前时间并把参数传给last_update_instant
-            dynamic_max_bitrate: f32::MAX,      //获取动态比特率最大值
-            update_needed: true,                //更新需求设置为true
+            last_frame_instant: Instant::now(),
+            last_update_instant: Instant::now(),
+            dynamic_max_bitrate: f32::MAX,
+            update_needed: true,
         }
     }
 
@@ -78,40 +75,32 @@ impl BitrateManager {
         }
     }
 
-    //报告编码帧的大小，把每一帧的大小加入包大小历史记录中
     pub fn report_encoded_frame_size(&mut self, timestamp: Duration, size_bytes: usize) {
         self.packet_sizes_bits_history
             .push_back((timestamp, size_bytes * 8));
     }
 
-    //解码延迟用于学习一个合适的最大比特率约束，以避免解码器失控。
     // decoder_latency is used to learn a suitable maximum bitrate bound to avoid decoder runaway
     // latency
-    //报告帧延迟
     pub fn report_frame_latencies(
         &mut self,
-        timestamp: Duration,       //时间戳
-        network_latency: Duration, //网路延迟
-        decoder_latency: Duration, //解码延迟
+        timestamp: Duration,
+        network_latency: Duration,
+        decoder_latency: Duration,
     ) {
         if network_latency == Duration::ZERO {
             return;
         }
 
-        //遍历包大小历史记录，更新码率平均值
         while let Some(&(timestamp_, size_bits)) = self.packet_sizes_bits_history.front() {
             if timestamp_ == timestamp {
-                // 提交网络延迟和包大小的样本，更新码率平均值
                 self.bitrate_average
                     .submit_sample(size_bits as f32 / network_latency.as_secs_f32());
 
-                // 移除历史记录中的第一个元素
                 self.packet_sizes_bits_history.pop_front();
-                //// 退出循环
 
                 break;
             } else {
-                // 移除历史记录中的第一个元素
                 self.packet_sizes_bits_history.pop_front();
             }
         }
@@ -122,7 +111,6 @@ impl BitrateManager {
         } = &self.config.mode
         {
             if decoder_latency > Duration::from_millis(config.max_decoder_latency_ms) {
-                //解码延迟超出次数+1
                 self.decoder_latency_overstep_count += 1;
 
                 // 如果解码器延迟超限计数器等于指定的帧数，则更新最大码率并标记需要更新
@@ -133,26 +121,19 @@ impl BitrateManager {
                             * config.latency_overstep_multiplier;
                     self.update_needed = true;
 
-                    //重置解码延迟超限计数器
                     self.decoder_latency_overstep_count = 0;
                 }
             } else {
-                // 如果解码器延迟没有超过最大延迟值，重置解码器延迟超限计数器
                 self.decoder_latency_overstep_count = 0;
             }
         }
     }
 
-    //报告一些编码参数
     pub fn get_encoder_params(&mut self) -> FfiDynamicEncoderParams {
-        //获取当前时间
         let now = Instant::now();
-        //检查是否需要更新编码器参数
         if self.update_needed || now > self.last_update_instant + UPDATE_INTERVAL {
-            //如果需要更新参数，记录当前时间作为最后更新时间
             self.last_update_instant = now;
         } else {
-            //如果不需要更新参数，返回一个默认的 FfiDynamicEncoderParams
             return FfiDynamicEncoderParams {
                 updated: 0,
                 bitrate_bps: 0,
@@ -160,11 +141,11 @@ impl BitrateManager {
             };
         }
 
+
         //计算比特率
         let bitrate_bps = match &self.config.mode {
             //如果使用恒定比特率模式
             BitrateMode::ConstantMbps(bitrate_mbps) => *bitrate_mbps as f32 * 1e6,
-            //如果使用自适应比特率模式
             BitrateMode::Adaptive {
                 saturation_multiplier,
                 max_bitrate_mbps,
@@ -172,16 +153,15 @@ impl BitrateManager {
                 max_network_latency_ms,
                 ..
             } => {
-                //计算平均比特率并乘以饱和度因子
                 let mut bitrate_bps = self.bitrate_average.get_average() * saturation_multiplier;
-                //如果指定了最大比特率，限制比特率不超过最大比特率
+
                 if let Switch::Enabled(max) = max_bitrate_mbps {
                     bitrate_bps = f32::min(bitrate_bps, *max as f32 * 1e6);
                 }
-                //如果指定了最小比特率，限制比特率不低于最小比特率
                 if let Switch::Enabled(min) = min_bitrate_mbps {
                     bitrate_bps = f32::max(bitrate_bps, *min as f32 * 1e6);
                 }
+
                 //如果指定了最大网络延迟，根据网络延迟和最大网络延迟计算比特率
                 if let Switch::Enabled(max_ms) = max_network_latency_ms {
                     let multiplier = *max_ms as f32
@@ -189,6 +169,7 @@ impl BitrateManager {
                         / self.network_latency_average.get_average().as_secs_f32();
                     bitrate_bps = f32::min(bitrate_bps, bitrate_bps * multiplier);
                 }
+
                 //限制比特率不超过动态最大比特率
                 bitrate_bps = f32::min(bitrate_bps, self.dynamic_max_bitrate);
 
@@ -196,6 +177,7 @@ impl BitrateManager {
                 bitrate_bps
             }
         };
+
 
         //计算帧率
         let framerate = if self.config.adapt_to_framerate.enabled() {
@@ -208,7 +190,6 @@ impl BitrateManager {
             self.nominal_framerate
         };
 
-        //返回计算出的 FfiDynamicEncoderParams
         FfiDynamicEncoderParams {
             updated: 1,
             bitrate_bps: bitrate_bps as u64,
