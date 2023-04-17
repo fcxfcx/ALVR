@@ -72,9 +72,9 @@ struct FfiButtonValue {
 };
 
 struct FfiDynamicEncoderParams {
-    unsigned int updated; //更新
-    unsigned long long bitrate_bps; //比特率
-    float framerate; //帧率
+    unsigned int updated;           // 更新
+    unsigned long long bitrate_bps; // 比特率
+    float framerate;                // 帧率
 };
 
 extern "C" const unsigned char *FRAME_RENDER_VS_CSO_PTR;

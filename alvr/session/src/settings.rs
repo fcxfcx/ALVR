@@ -866,18 +866,6 @@ pub fn session_settings_default() -> SettingsDefault {
                                 latency_overstep_multiplier: 0.99,
                             },
                         },
-                        max_network_latency_ms: SwitchDefault {
-                            enabled: false,
-                            content: 8,
-                        },
-                        decoder_latency_fixer: SwitchDefault {
-                            enabled: true,
-                            content: DecoderLatencyFixerDefault {
-                                max_decoder_latency_ms: 20,
-                                latency_overstep_frames: 30,
-                                latency_overstep_multiplier: 0.99,
-                            },
-                        },
                     },
                     variant: BitrateModeDefaultVariant::Adaptive,
                 },

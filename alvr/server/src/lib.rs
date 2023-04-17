@@ -29,7 +29,7 @@ use alvr_common::{
     prelude::*,
     RelaxedAtomic,
 };
-use alvr_events::EventType;
+use alvr_events::{BitrateSelection, EventType};
 use alvr_filesystem::{self as afs, Layout};
 use alvr_server_data::ServerDataManager;
 use alvr_session::CodecType;
@@ -452,7 +452,11 @@ pub unsafe extern "C" fn HmdDriverFactory(
     }
 
     extern "C" fn get_dynamic_encoder_params() -> FfiDynamicEncoderParams {
-        BITRATE_MANAGER.lock().get_encoder_params()
+        let params = BITRATE_MANAGER.lock().get_encoder_params();
+        alvr_events::send_event(EventType::BitrateSelection(BitrateSelection {
+            bitrate_bps: params.bitrate_bps,
+        }));
+        params
     }
 
     LogError = Some(log_error);

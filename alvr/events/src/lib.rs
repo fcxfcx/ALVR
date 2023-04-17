@@ -34,6 +34,11 @@ pub struct TargetStatistics {
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
+pub struct BitrateSelection {
+    pub bitrate_bps: u64,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, Default)]
 pub struct GraphStatistics {
     pub total_pipeline_latency_s: f32,
     pub game_time_s: f32,
@@ -85,6 +90,7 @@ pub enum EventType {
     ServerRequestsSelfRestart,
     Log(LogEvent),
     TargetStatistics(TargetStatistics),
+    BitrateSelection(BitrateSelection),
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -97,6 +103,9 @@ pub fn send_event(event_type: EventType) {
     // only send the data we want to the log file
     match event_type {
         EventType::TargetStatistics(_) => {
+            info!("{}", serde_json::to_string(&event_type).unwrap());
+        }
+        EventType::BitrateSelection(_) => {
             info!("{}", serde_json::to_string(&event_type).unwrap());
         }
         _ => {
