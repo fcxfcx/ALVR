@@ -257,52 +257,6 @@ pub fn microphone_schema(devices: Vec<String>) -> PresetSchemaNode {
     })
 }
 
-pub fn eye_face_tracking_schema() -> PresetSchemaNode {
-    PresetSchemaNode::HigherOrderChoice(HigherOrderChoiceSchema {
-        name: "eye_face_tracking".into(),
-        strings: [("display_name".into(), "Eye and face tracking".into())]
-            .into_iter()
-            .collect(),
-        flags: HashSet::new(),
-        options: [
-            HigherOrderChoiceOption {
-                display_name: "VRChat Eye OSC".into(),
-                modifiers: vec![
-                    bool_modifier("session_settings.headset.face_tracking.enabled", true),
-                    string_modifier(
-                        "session_settings.headset.face_tracking.content.sink.variant",
-                        "VrchatEyeOsc",
-                    ),
-                ],
-                content: None,
-            },
-            HigherOrderChoiceOption {
-                display_name: "VRCFaceTracking OSC".into(),
-                modifiers: vec![
-                    bool_modifier("session_settings.headset.face_tracking.enabled", true),
-                    string_modifier(
-                        "session_settings.headset.face_tracking.content.sink.variant",
-                        "VrcFaceTrackingOsc",
-                    ),
-                ],
-                content: None,
-            },
-            HigherOrderChoiceOption {
-                display_name: "Disable".into(),
-                modifiers: vec![bool_modifier(
-                    "session_settings.headset.face_tracking.enabled",
-                    false,
-                )],
-                content: None,
-            },
-        ]
-        .into_iter()
-        .collect(),
-        default_option_index: 2,
-        gui: ChoiceControlType::ButtonGroup,
-    })
-}
-
 pub fn null_preset_schema() -> PresetSchemaNode {
     PresetSchemaNode::HigherOrderChoice(HigherOrderChoiceSchema {
         name: "null".into(),

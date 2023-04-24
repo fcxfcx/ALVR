@@ -5,11 +5,10 @@ use alvr_common::{
     glam::{Quat, UVec2, Vec2, Vec3},
     parking_lot::{Mutex, RwLock},
     prelude::*,
-    settings_schema::Switch,
-    DeviceMotion, Fov, Pose, RelaxedAtomic, HEAD_ID, LEFT_HAND_ID, RIGHT_HAND_ID,
+    Fov, RelaxedAtomic, HEAD_ID, LEFT_HAND_ID, RIGHT_HAND_ID,
 };
-use alvr_sockets::{FaceData, Tracking};
-use interaction::{FaceInputContext, HandsInteractionContext};
+use alvr_sockets::{DeviceMotion, Pose, Tracking};
+use interaction::StreamingInteractionContext;
 use khronos_egl::{self as egl, EGL1_4};
 use openxr as xr;
 use std::{
@@ -45,8 +44,7 @@ struct StreamingInputContext {
     frame_interval: Duration,
     xr_instance: xr::Instance,
     xr_session: xr::Session<xr::AnyGraphics>,
-    hands_context: Arc<HandsInteractionContext>,
-    face_context: Option<FaceInputContext>,
+    interaction_context: Arc<StreamingInteractionContext>,
     reference_space: Arc<RwLock<xr::Space>>,
     views_history: Arc<Mutex<VecDeque<HistoryView>>>,
 }
@@ -54,7 +52,8 @@ struct StreamingInputContext {
 #[derive(Default)]
 struct StreamingInputState {
     last_ipd: f32,
-    last_hand_positions: [Vec3; 2],
+    last_left_hand_position: Vec3,
+    last_right_hand_position: Vec3,
 }
 
 // 这个EglContext结构应该是对于egl的一个重新封装，egl是opengl与底层原生平台窗口系统之间的接口
@@ -219,7 +218,7 @@ fn update_streaming_input(
     // Streaming related inputs are updated here. Make sure every input poll is done in this
     // thread
     ctx.xr_session
-        .sync_actions(&[(&ctx.hands_context.action_set).into()])
+        .sync_actions(&[(&ctx.interaction_context.action_set).into()])
         .map_err(err!())?;
 
     let now = xr_runtime_now(&ctx.xr_instance, ctx.platform).ok_or_else(enone!())?;
@@ -284,15 +283,15 @@ fn update_streaming_input(
         &ctx.xr_session,
         &ctx.reference_space.read(),
         tracker_time,
-        &ctx.hands_context.hand_sources[0],
-        &mut state.last_hand_positions[0],
+        &ctx.interaction_context.left_hand_source,
+        &mut state.last_left_hand_position,
     )?;
     let (right_hand_motion, right_hand_skeleton) = interaction::get_hand_motion(
         &ctx.xr_session,
         &ctx.reference_space.read(),
         tracker_time,
-        &ctx.hands_context.hand_sources[1],
-        &mut state.last_hand_positions[1],
+        &ctx.interaction_context.right_hand_source,
+        &mut state.last_right_hand_position,
     )?;
 
     if let Some(motion) = left_hand_motion {
@@ -302,32 +301,17 @@ fn update_streaming_input(
         device_motions.push((*RIGHT_HAND_ID, motion));
     }
 
-    let face_data = if let Some(context) = &ctx.face_context {
-        FaceData {
-            eye_gazes: interaction::get_eye_gazes(
-                context,
-                &ctx.reference_space.read(),
-                to_xr_time(now),
-            ),
-            fb_face_expression: interaction::get_fb_face_expression(context, to_xr_time(now)),
-            htc_eye_expression: interaction::get_htc_eye_expression(context),
-            htc_lip_expression: interaction::get_htc_lip_expression(context),
-        }
-    } else {
-        Default::default()
-    };
-
     alvr_client_core::send_tracking(Tracking {
         target_timestamp,
         device_motions,
-        hand_skeletons: [left_hand_skeleton, right_hand_skeleton],
-        face_data,
+        left_hand_skeleton,
+        right_hand_skeleton,
     });
 
     interaction::update_buttons(
         ctx.platform,
         &ctx.xr_session,
-        &ctx.hands_context.button_actions,
+        &ctx.interaction_context.button_actions,
     )
 }
 
@@ -365,11 +349,8 @@ pub fn entry_point() {
 
     let mut exts = xr::ExtensionSet::default();
     exts.ext_hand_tracking = available_extensions.ext_hand_tracking;
-    exts.fb_color_space = available_extensions.fb_color_space;
     exts.fb_display_refresh_rate = available_extensions.fb_display_refresh_rate;
-    exts.fb_eye_tracking_social = available_extensions.fb_eye_tracking_social;
-    exts.fb_face_tracking = available_extensions.fb_face_tracking;
-    exts.htc_facial_tracking = available_extensions.htc_facial_tracking;
+    exts.fb_color_space = available_extensions.fb_color_space;
     exts.htc_vive_focus3_controller_interaction =
         available_extensions.htc_vive_focus3_controller_interaction;
     #[cfg(target_os = "android")]
@@ -429,12 +410,13 @@ pub fn entry_point() {
         alvr_client_core::initialize(recommended_view_resolution, supported_refresh_rates, false);
         alvr_client_core::opengl::initialize();
 
-        let hands_context = Arc::new(interaction::initialize_hands_interaction(
-            platform,
-            &xr_instance,
-            xr_system,
-            &xr_session.clone().into_any_graphics(),
-        ));
+        let streaming_interaction_context =
+            Arc::new(interaction::initialize_streaming_interaction(
+                platform,
+                &xr_instance,
+                xr_system,
+                &xr_session.clone().into_any_graphics(),
+            ));
 
         let reference_space = Arc::new(RwLock::new(
             xr_session
@@ -605,57 +587,26 @@ pub fn entry_point() {
                     // 推流开始？？？
                     ClientCoreEvent::StreamingStarted {
                         view_resolution,
-                        refresh_rate_hint,
-                        settings,
+                        fps,
+                        foveated_rendering,
+                        oculus_foveation_level,
+                        dynamic_oculus_foveation,
                     } => {
-                        stream_view_resolution = view_resolution;
-
                         if exts.fb_display_refresh_rate {
-                            xr_session
-                                .request_display_refresh_rate(refresh_rate_hint)
-                                .unwrap();
+                            xr_session.request_display_refresh_rate(fps).unwrap();
                         }
 
+                        stream_view_resolution = view_resolution;
+
                         is_streaming.set(true);
-
-                        let face_context =
-                            if let Switch::Enabled(config) = settings.headset.face_tracking {
-                                // todo: check which permissions are needed for htc
-                                #[cfg(target_os = "android")]
-                                {
-                                    if config.sources.eye_tracking_fb {
-                                        alvr_client_core::try_get_permission(
-                                            "com.oculus.permission.EYE_TRACKING",
-                                        );
-                                    }
-                                    if config.sources.face_tracking_fb {
-                                        alvr_client_core::try_get_permission(
-                                            "com.oculus.permission.FACE_TRACKING",
-                                        );
-                                    }
-                                }
-
-                                Some(interaction::initialize_face_input(
-                                    &xr_instance,
-                                    xr_system,
-                                    &xr_session,
-                                    config.sources.eye_tracking_fb,
-                                    config.sources.face_tracking_fb,
-                                    config.sources.eye_expressions_htc,
-                                    config.sources.lip_expressions_htc,
-                                ))
-                            } else {
-                                None
-                            };
 
                         let context = StreamingInputContext {
                             platform,
                             is_streaming: Arc::clone(&is_streaming),
-                            frame_interval: Duration::from_secs_f32(1.0 / refresh_rate_hint),
+                            frame_interval: Duration::from_secs_f32(1.0 / fps),
                             xr_instance: xr_instance.clone(),
                             xr_session: xr_session.clone().into_any_graphics(),
-                            hands_context: Arc::clone(&hands_context),
-                            face_context,
+                            interaction_context: Arc::clone(&streaming_interaction_context),
                             reference_space: Arc::clone(&reference_space),
                             views_history: Arc::clone(&views_history),
                         };
@@ -695,7 +646,7 @@ pub fn entry_point() {
                                     .map(|i| *i as _)
                                     .collect(),
                             ],
-                            settings.video.foveated_rendering.into_option(),
+                            foveated_rendering,
                         );
 
                         alvr_client_core::send_playspace(
@@ -721,9 +672,13 @@ pub fn entry_point() {
                         amplitude,
                     } => {
                         let action = if device_id == *LEFT_HAND_ID {
-                            &hands_context.hand_sources[0].vibration_action
+                            &streaming_interaction_context
+                                .left_hand_source
+                                .vibration_action
                         } else {
-                            &hands_context.hand_sources[1].vibration_action
+                            &streaming_interaction_context
+                                .right_hand_source
+                                .vibration_action
                         };
 
                         action

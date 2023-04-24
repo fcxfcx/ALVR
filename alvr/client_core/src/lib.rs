@@ -21,8 +21,6 @@ mod audio;
 
 pub use decoder::get_frame;
 pub use logging_backend::init_logging;
-#[cfg(target_os = "android")]
-pub use platform::try_get_permission;
 
 use alvr_common::{
     glam::{UVec2, Vec2},
@@ -32,7 +30,7 @@ use alvr_common::{
     Fov, RelaxedAtomic,
 };
 use alvr_events::ButtonValue;
-use alvr_session::{CodecType, Settings};
+use alvr_session::{CodecType, FoveatedRenderingDesc, OculusFovetionLevel};
 use alvr_sockets::{BatteryPacket, ClientControlPacket, ClientStatistics, Tracking, ViewsConfig};
 use decoder::EXTERNAL_DECODER;
 use serde::{Deserialize, Serialize};
@@ -69,8 +67,10 @@ pub enum ClientCoreEvent {
     UpdateHudMessage(String),
     StreamingStarted {
         view_resolution: UVec2,
-        refresh_rate_hint: f32,
-        settings: Box<Settings>,
+        fps: f32,
+        foveated_rendering: Option<FoveatedRenderingDesc>,
+        oculus_foveation_level: OculusFovetionLevel,
+        dynamic_oculus_foveation: bool,
     },
     StreamingStopped,
     Haptics {
@@ -107,7 +107,7 @@ pub fn initialize(
     }
 
     #[cfg(target_os = "android")]
-    platform::try_get_permission(platform::MICROPHONE_PERMISSION);
+    platform::try_get_microphone_permission();
     #[cfg(target_os = "android")]
     platform::acquire_wifi_lock();
 

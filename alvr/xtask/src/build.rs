@@ -176,7 +176,7 @@ pub fn build_streamer(
     }
 }
 
-pub fn build_client_lib(profile: Profile, link_stdcpp: bool) {
+pub fn build_client_lib(profile: Profile) {
     let sh = Shell::new().unwrap();
 
     let build_dir = afs::build_dir().join("alvr_client_core");
@@ -191,16 +191,13 @@ pub fn build_client_lib(profile: Profile, link_stdcpp: bool) {
         Profile::Release => flags.push("--release"),
         Profile::Debug => (),
     }
-    if !link_stdcpp {
-        flags.push("--no-default-features");
-    }
     let flags_ref = &flags;
 
     let _push_guard = sh.push_dir(afs::crate_dir("client_core"));
 
     cmd!(
         sh,
-        "cargo ndk -t arm64-v8a -t armeabi-v7a -t x86_64 -t x86 -p 26 -o {build_dir} build {flags_ref...}"
+        "cargo ndk -t arm64-v8a -p 26 -o {build_dir} build {flags_ref...}"
     )
     .run()
     .unwrap();

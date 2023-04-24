@@ -1,7 +1,8 @@
 #![allow(unused_variables)]
 
-use alvr_common::{glam::UVec2, Fov, Pose};
+use alvr_common::{glam::UVec2, Fov};
 use alvr_session::FoveatedRenderingDesc;
+use alvr_sockets::Pose;
 use glyph_brush_layout::{
     ab_glyph::{Font, FontRef, ScaleFont},
     FontId, GlyphPositioner, HorizontalAlign, Layout, SectionGeometry, SectionText, VerticalAlign,

@@ -2,10 +2,10 @@ use alvr_client_core::ClientCoreEvent;
 use alvr_common::{
     glam::{Quat, UVec2, Vec3},
     parking_lot::RwLock,
-    DeviceMotion, Pose, RelaxedAtomic, HEAD_ID,
+    RelaxedAtomic, HEAD_ID,
 };
 use alvr_session::CodecType;
-use alvr_sockets::Tracking;
+use alvr_sockets::{DeviceMotion, Pose, Tracking};
 use eframe::{
     egui::{self, CentralPanel, Context, RichText, Slider},
     Frame, NativeOptions,
@@ -55,6 +55,7 @@ struct WindowOutput {
     fps: f32,
     connected: bool,
     resolution: UVec2,
+    foveated_rendering: bool,
     decoder_codec: Option<CodecType>,
     current_frame_timestamp: Duration,
 }
@@ -66,6 +67,7 @@ impl Default for WindowOutput {
             fps: 60.0,
             connected: false,
             resolution: UVec2::ZERO,
+            foveated_rendering: false,
             decoder_codec: None,
             current_frame_timestamp: Duration::ZERO,
         }
@@ -108,6 +110,10 @@ impl eframe::App for Window {
             ui.label(format!("FPS: {}", self.output.fps));
             ui.label(format!("Connected: {}", self.output.connected));
             ui.label(format!("View resolution: {}", self.output.resolution));
+            ui.label(format!(
+                "Foveated rendering: {}",
+                self.output.foveated_rendering
+            ));
             ui.label(format!("Codec: {:?}", self.output.decoder_codec));
             ui.label(format!(
                 "Current frame: {:?}",
@@ -191,7 +197,8 @@ fn tracking_thread(streaming: Arc<RelaxedAtomic>, fps: f32, input: Arc<RwLock<Wi
                     angular_velocity: Vec3::ZERO,
                 },
             )],
-            ..Default::default()
+            left_hand_skeleton: None,
+            right_hand_skeleton: None,
         });
 
         drop(input_lock);
@@ -229,12 +236,14 @@ fn client_thread(
                 }
                 ClientCoreEvent::StreamingStarted {
                     view_resolution,
-                    refresh_rate_hint: fps,
+                    fps,
+                    foveated_rendering,
                     ..
                 } => {
                     window_output.fps = fps;
                     window_output.connected = true;
                     window_output.resolution = view_resolution;
+                    window_output.foveated_rendering = foveated_rendering.is_some();
 
                     let streaming = Arc::clone(&streaming);
                     let input = Arc::clone(&window_input);

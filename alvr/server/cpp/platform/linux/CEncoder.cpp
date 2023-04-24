@@ -273,7 +273,7 @@ void CEncoder::Run() {
         ReportPresent(pose->targetTimestampNs, present_offset);
         ReportComposed(pose->targetTimestampNs, composed_offset);
 
-        ParseFrameNals(encode_pipeline->GetCodec(), packet.data, packet.size, packet.pts);
+        ParseFrameNals(packet.data, packet.size, packet.pts);
       }
     }
     catch (std::exception &e) {

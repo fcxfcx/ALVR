@@ -85,7 +85,9 @@ pub fn package_streamer(gpl: bool, root: Option<String>, appimage: bool, zsync: 
     // Finally package everything
     if cfg!(windows) {
         command::zip(&sh, &afs::streamer_build_dir()).unwrap();
-        build_windows_installer();
+
+        // the wix file broke
+        // build_windows_installer();
     } else {
         command::targz(&sh, &afs::streamer_build_dir()).unwrap();
 
@@ -156,10 +158,10 @@ fn package_streamer_appimage(release: bool, update: bool) {
     cmd!(&sh, "{linuxdeploy} --appdir={appdir} -i{icon} -d{desktop} --deploy-deps-only={appdir}/usr/lib64/alvr/bin/linux64/driver_alvr_server.so --deploy-deps-only={appdir}/usr/lib64/libalvr_vulkan_layer.so --output appimage").run().unwrap();
 }
 
-pub fn package_client_lib(link_stdcpp: bool) {
+pub fn package_client_lib() {
     let sh = Shell::new().unwrap();
 
-    build::build_client_lib(Profile::Distribution, link_stdcpp);
+    build::build_client_lib(Profile::Distribution);
 
     command::zip(&sh, &afs::build_dir().join("alvr_client_core")).unwrap();
 }
