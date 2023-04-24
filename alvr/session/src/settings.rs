@@ -525,6 +525,28 @@ pub enum HeadsetEmulationMode {
 }
 
 #[derive(SettingsSchema, Serialize, Deserialize, Clone)]
+pub struct FaceTrackingSources {
+    pub eye_tracking_fb: bool,
+    pub face_tracking_fb: bool,
+    pub eye_expressions_htc: bool,
+    pub lip_expressions_htc: bool,
+}
+
+#[derive(SettingsSchema, Serialize, Deserialize, Clone)]
+pub enum FaceTrackingSinkConfig {
+    #[schema(strings(display_name = "VRChat Eye OSC"))]
+    VrchatEyeOsc { port: u16 },
+    #[schema(strings(display_name = "VRCFaceTracking OSC"))]
+    VrcFaceTrackingOsc { port: u16 },
+}
+
+#[derive(SettingsSchema, Serialize, Deserialize, Clone)]
+pub struct FaceTrackingConfig {
+    pub sources: FaceTrackingSources,
+    pub sink: FaceTrackingSinkConfig,
+}
+
+#[derive(SettingsSchema, Serialize, Deserialize, Clone)]
 pub enum ControllersEmulationMode {
     #[schema(strings(display_name = "Rift S Touch"))]
     RiftSTouch,
@@ -630,6 +652,8 @@ pub struct HeadsetDesc {
     #[schema(flag = "steamvr-restart")]
     pub enable_vive_tracker_proxy: bool,
 
+    pub face_tracking: Switch<FaceTrackingConfig>,
+
     #[schema(flag = "steamvr-restart")]
     pub controllers: Switch<ControllersDesc>,
 
@@ -684,15 +708,17 @@ pub struct DisconnectionCriteria {
 
 #[derive(SettingsSchema, Serialize, Deserialize, Clone)]
 pub struct ConnectionDesc {
-    pub client_discovery: Switch<DiscoveryConfig>,
-
-    pub web_server_port: u16,
-
     #[schema(strings(
         help = r#"UDP: Faster, but less stable than TCP. Try this if your network is well optimized and free of interference.
 TCP: Slower than UDP, but more stable. Pick this if you experience video or audio stutters with UDP."#
     ))]
     pub stream_protocol: SocketProtocol,
+
+    pub client_discovery: Switch<DiscoveryConfig>,
+
+    pub stream_port: u16,
+    pub web_server_port: u16,
+    pub osc_local_port: u16,
 
     #[schema(strings(display_name = "Streamer send buffer size"))]
     pub server_send_buffer_bytes: SocketBufferSize,
@@ -705,8 +731,6 @@ TCP: Slower than UDP, but more stable. Pick this if you experience video or audi
 
     #[schema(strings(display_name = "Client receive buffer size"))]
     pub client_recv_buffer_bytes: SocketBufferSize,
-
-    pub stream_port: u16,
 
     #[schema(strings(
         help = "Reduce minimum delay between keyframes from 100ms to 5ms. Use on networks with high packet loss."
@@ -737,6 +761,7 @@ TCP: Slower than UDP, but more stable. Pick this if you experience video or audi
 pub struct LoggingConfig {
     #[schema(strings(help = "Write logs into the session_log.txt file."))]
     pub log_to_disk: bool,
+    pub log_tracking: bool,
     pub log_button_presses: bool,
     pub log_haptics: bool,
     pub notification_level: LogSeverity,
@@ -948,7 +973,7 @@ pub fn session_settings_default() -> SettingsDefault {
                         ("priority".into(), int32_default(0)),
                         // low-latency: only applicable on API level 30. Quest 1 and 2 might not be
                         // cabable, since they are on level 29.
-                        ("low-latency".into(), int32_default(1)),
+                        // ("low-latency".into(), int32_default(1)), // Android smartphones crashes enabling this feature (https://github.com/PhoneVR-Developers/alvr-cardboard/issues/5)
                         (
                             "vendor.qti-ext-dec-low-latency.enable".into(),
                             int32_default(1),
@@ -1028,6 +1053,24 @@ pub fn session_settings_default() -> SettingsDefault {
             extra_openvr_props: default_custom_openvr_props.clone(),
             tracking_ref_only: false,
             enable_vive_tracker_proxy: false,
+            face_tracking: SwitchDefault {
+                enabled: false,
+                content: FaceTrackingConfigDefault {
+                    sources: FaceTrackingSourcesDefault {
+                        eye_tracking_fb: true,
+                        face_tracking_fb: true,
+                        eye_expressions_htc: true,
+                        lip_expressions_htc: true,
+                    },
+                    sink: FaceTrackingSinkConfigDefault {
+                        VrchatEyeOsc: FaceTrackingSinkConfigVrchatEyeOscDefault { port: 9000 },
+                        VrcFaceTrackingOsc: FaceTrackingSinkConfigVrcFaceTrackingOscDefault {
+                            port: 9620,
+                        },
+                        variant: FaceTrackingSinkConfigDefaultVariant::VrchatEyeOsc,
+                    },
+                },
+            },
             controllers: SwitchDefault {
                 enabled: true,
                 content: ControllersDescDefault {
@@ -1069,6 +1112,9 @@ pub fn session_settings_default() -> SettingsDefault {
             },
         },
         connection: ConnectionDescDefault {
+            stream_protocol: SocketProtocolDefault {
+                variant: SocketProtocolDefaultVariant::Udp,
+            },
             client_discovery: SwitchDefault {
                 enabled: true,
                 content: DiscoveryConfigDefault {
@@ -1076,14 +1122,12 @@ pub fn session_settings_default() -> SettingsDefault {
                 },
             },
             web_server_port: 8082,
-            stream_protocol: SocketProtocolDefault {
-                variant: SocketProtocolDefaultVariant::Udp,
-            },
+            stream_port: 9944,
+            osc_local_port: 9942,
             server_send_buffer_bytes: socket_buffer.clone(),
             server_recv_buffer_bytes: socket_buffer.clone(),
             client_send_buffer_bytes: socket_buffer.clone(),
             client_recv_buffer_bytes: socket_buffer,
-            stream_port: 9944,
             aggressive_keyframe_resend: false,
             on_connect_script: "".into(),
             on_disconnect_script: "".into(),
@@ -1100,6 +1144,7 @@ pub fn session_settings_default() -> SettingsDefault {
         logging: LoggingConfigDefault {
             log_to_disk: cfg!(debug_assertions),
             log_button_presses: false,
+            log_tracking: false,
             log_haptics: false,
             notification_level: LogSeverityDefault {
                 variant: if cfg!(debug_assertions) {
