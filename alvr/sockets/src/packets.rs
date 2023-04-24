@@ -1,6 +1,6 @@
 use alvr_common::{
-    glam::{Quat, UVec2, Vec2, Vec3},
-    Fov, LogSeverity,
+    glam::{UVec2, Vec2},
+    DeviceMotion, Fov, LogSeverity, Pose,
 };
 use alvr_events::{ButtonValue, LogEvent};
 use alvr_session::{CodecType, SessionDesc};
@@ -93,25 +93,21 @@ pub enum ClientControlPacket {
     ReservedBuffer(Vec<u8>),
 }
 
-#[derive(Serialize, Deserialize, Clone, Copy, Default, Debug)]
-pub struct Pose {
-    pub orientation: Quat, //空间位置 -- 旋转
-    pub position: Vec3,    //空间位置 -- 位移
+#[derive(Serialize, Deserialize, Default)]
+pub struct FaceData {
+    pub eye_gazes: [Option<Pose>; 2],
+    pub fb_face_expression: Option<Vec<f32>>, // issue: Serialize does not support [f32; 63]
+    pub htc_eye_expression: Option<Vec<f32>>,
+    pub htc_lip_expression: Option<Vec<f32>>, // issue: Serialize does not support [f32; 37]
 }
 
-#[derive(Serialize, Deserialize, Clone, Copy, Default, Debug)]
-pub struct DeviceMotion {
-    pub pose: Pose,             // 姿态信息 -- 位置（旋转+位移）
-    pub linear_velocity: Vec3,  // 姿态信息 -- 线速度
-    pub angular_velocity: Vec3, // 姿态信息 -- 角速度
-}
-
-#[derive(Serialize, Deserialize)]
+// Note: face_data does not respect target_timestamp.
+#[derive(Serialize, Deserialize, Default)]
 pub struct Tracking {
     pub target_timestamp: Duration,               // 追踪信息--目标时间戳
     pub device_motions: Vec<(u64, DeviceMotion)>, // 追踪信息--设备运动
-    pub left_hand_skeleton: Option<[Pose; 26]>,   // 追踪信息--左手骨架
-    pub right_hand_skeleton: Option<[Pose; 26]>,  // 追踪信息--右手骨架
+    pub hand_skeletons: [Option<[Pose; 26]>; 2],  // 追踪信息--手骨架
+    pub face_data: FaceData,                      // 追踪信息--人脸数据
 }
 
 #[derive(Serialize, Deserialize)]

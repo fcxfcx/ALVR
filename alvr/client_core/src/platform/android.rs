@@ -30,6 +30,8 @@ use std::{
     time::Duration,
 };
 
+pub const MICROPHONE_PERMISSION: &str = "android.permission.RECORD_AUDIO";
+
 static WIFI_LOCK: Lazy<Mutex<Option<GlobalRef>>> = Lazy::new(|| Mutex::new(None));
 
 struct FakeThreadSafe<T>(T);
@@ -64,11 +66,11 @@ fn get_api_level() -> i32 {
         .unwrap()
 }
 
-pub fn try_get_microphone_permission() {
+pub fn try_get_permission(permission: &str) {
     let vm = vm();
     let mut env = vm.attach_current_thread().unwrap();
 
-    let mic_perm_jstring = env.new_string("android.permission.RECORD_AUDIO").unwrap();
+    let mic_perm_jstring = env.new_string(permission).unwrap();
 
     let permission_status = env
         .call_method(
@@ -208,6 +210,8 @@ pub fn release_wifi_lock() {
 
         env.call_method(wifi_lock.as_obj(), "release", "()V", &[])
             .unwrap();
+        // TODO: all JVM.call_method sometimes result in JavaExceptions, unwrap will only report Error as 'JavaException', ideally before unwrapping
+        // need to call JVM.describe_error() which will actually check if there is an exception and print error to stderr/logcat. Then unwrap.
 
         // wifi_lock is dropped here
     }
@@ -449,6 +453,8 @@ pub fn video_decoder_split(
             let decoder = Arc::new(FakeThreadSafe(
                 MediaCodec::from_decoder_type(&mime).unwrap(),
             ));
+
+            info!("Using AMediaCoded format:{} ", format);
             decoder
                 .configure(
                     &format,
