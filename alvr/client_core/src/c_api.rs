@@ -11,7 +11,7 @@ use alvr_common::{
 };
 use alvr_events::ButtonValue;
 use alvr_session::{CodecType, FoveatedRenderingDesc};
-use alvr_sockets::Tracking;
+use alvr_packets::Tracking;
 use std::{
     collections::VecDeque,
     ffi::{c_char, c_void, CStr, CString},

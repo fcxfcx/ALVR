@@ -1,7 +1,7 @@
 use crate::{ClientCoreEvent, EVENT_QUEUE};
 use alvr_common::{once_cell::sync::Lazy, parking_lot::Mutex, RelaxedAtomic};
 use alvr_session::{CodecType, MediacodecDataType};
-use alvr_sockets::DecoderInitializationConfig;
+use alvr_packets::DecoderInitializationConfig;
 use std::time::Duration;
 
 #[cfg(target_os = "android")]
