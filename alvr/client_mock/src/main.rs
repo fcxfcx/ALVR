@@ -5,7 +5,7 @@ use alvr_common::{
     DeviceMotion, Pose, RelaxedAtomic, HEAD_ID,
 };
 use alvr_session::CodecType;
-use alvr_sockets::Tracking;
+use alvr_packets::Tracking;
 use eframe::{
     egui::{self, CentralPanel, Context, RichText, Slider},
     Frame, NativeOptions,

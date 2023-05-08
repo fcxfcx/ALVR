@@ -34,7 +34,7 @@ use alvr_events::{BitrateSelection, EventType};
 use alvr_filesystem::{self as afs, Layout};
 use alvr_server_io::ServerDataManager;
 use alvr_session::CodecType;
-use alvr_sockets::{
+use alvr_packets::{
     ClientListAction, DecoderInitializationConfig, Haptics, ServerControlPacket, VideoPacketHeader,
 };
 use bitrate::BitrateManager;

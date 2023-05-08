@@ -5,7 +5,7 @@ use super::{
 };
 use crate::dashboard::{get_id, ServerRequest};
 use alvr_session::{SessionSettings, Settings};
-use alvr_sockets::AudioDevicesList;
+use alvr_packets::AudioDevicesList;
 use eframe::egui::{Grid, ScrollArea, Ui};
 use serde_json as json;
 

@@ -4,7 +4,7 @@ use crate::{
     theme::log_colors::{INFO_LIGHT, WARNING_LIGHT},
 };
 use alvr_session::settings_schema::{SchemaEntry, SchemaNode};
-use alvr_sockets::PathValuePair;
+use alvr_packets::PathValuePair;
 use eframe::egui::{self, popup, Ui};
 use serde_json as json;
 use std::collections::HashMap;

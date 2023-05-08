@@ -4,7 +4,7 @@ use crate::{
     theme::{self, log_colors},
 };
 use alvr_session::SessionDesc;
-use alvr_sockets::ClientListAction;
+use alvr_packets::ClientListAction;
 use eframe::{
     egui::{Frame, Grid, Layout, RichText, TextEdit, Ui, Window},
     emath::{Align, Align2},
