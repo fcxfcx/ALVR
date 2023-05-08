@@ -30,13 +30,13 @@ use alvr_common::{
     prelude::*,
     RelaxedAtomic,
 };
-use alvr_events::EventType;
+use alvr_events::{BitrateSelection, EventType};
 use alvr_filesystem::{self as afs, Layout};
-use alvr_server_io::ServerDataManager;
-use alvr_session::CodecType;
 use alvr_packets::{
     ClientListAction, DecoderInitializationConfig, Haptics, ServerControlPacket, VideoPacketHeader,
 };
+use alvr_server_io::ServerDataManager;
+use alvr_session::CodecType;
 use bitrate::BitrateManager;
 use statistics::StatisticsManager;
 use std::{
@@ -495,6 +495,9 @@ pub unsafe extern "C" fn HmdDriverFactory(
 
     extern "C" fn get_dynamic_encoder_params() -> FfiDynamicEncoderParams {
         let params = BITRATE_MANAGER.lock().get_encoder_params();
+        alvr_events::send_event(EventType::BitrateSelection(BitrateSelection {
+            bitrate_bps: params.bitrate_bps,
+        }));
         params
     }
 

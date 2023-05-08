@@ -29,19 +29,21 @@ pub fn init_logging(events_sender: Sender<Event>) {
     if cfg!(debug_assertions) {
         log_dispatch = log_dispatch.level(LevelFilter::Debug)
     } else {
-        log_dispatch = log_dispatch.level(LevelFilter::Error);
+        log_dispatch = log_dispatch.level(LevelFilter::Info);
     }
 
     if SERVER_DATA_MANAGER.read().settings().logging.log_to_disk {
         // only print target statistics to the log file
-        log_dispatch = log_dispatch.chain(
-            fs::OpenOptions::new()
-                .write(true)
-                .create(true)
-                .truncate(true)
-                .open(FILESYSTEM_LAYOUT.session_log())
-                .unwrap(),
-        );
+        log_dispatch = log_dispatch
+            .chain(
+                fs::OpenOptions::new()
+                    .write(true)
+                    .create(true)
+                    .truncate(true)
+                    .open(FILESYSTEM_LAYOUT.session_log())
+                    .unwrap(),
+            )
+            .filter(|metadata| metadata.target() == "alvr_events");
     } else {
         // this sink is required to make sure all log gets processed and forwarded to the websocket
         if cfg!(target_os = "linux") {

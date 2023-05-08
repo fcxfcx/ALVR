@@ -1,11 +1,7 @@
 use alvr_common::{SlidingWindowAverage, HEAD_ID, LEFT_HAND_ID, RIGHT_HAND_ID};
-use alvr_events::{EventType, GraphStatistics, Statistics};
-<<<<<<< Updated upstream
+use alvr_events::{EventType, GraphStatistics, Statistics, TargetStatistics};
 use alvr_packets::ClientStatistics;
 
-=======
-use alvr_sockets::ClientStatistics;
->>>>>>> Stashed changes
 use std::{
     collections::{HashMap, VecDeque},
     time::{Duration, Instant},
@@ -227,6 +223,18 @@ impl StatisticsManager {
                 self.last_full_report_instant += FULL_REPORT_INTERVAL;
 
                 let interval_secs = FULL_REPORT_INTERVAL.as_secs_f32();
+
+                alvr_events::send_event(EventType::TargetStatistics(TargetStatistics {
+                    video_packets_total: self.video_packets_total,
+                    video_packets_per_sec: (self.video_packets_partial_sum as f32 / interval_secs)
+                        as _,
+                    video_mbytes_total: (self.video_bytes_total as f32 / 1e6) as usize,
+                    video_mbits_per_sec: self.video_bytes_partial_sum as f32 / interval_secs * 8.
+                        / 1e6,
+                    network_latency_ms: network_latency.as_secs_f32() * 1000.,
+                    encode_latency_ms: encoder_latency.as_secs_f32() * 1000.,
+                    decode_latency_ms: client_stats.video_decode.as_secs_f32() * 1000.,
+                }));
 
                 alvr_events::send_event(EventType::Statistics(Statistics {
                     video_packets_total: self.video_packets_total,
