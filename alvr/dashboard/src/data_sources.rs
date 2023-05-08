@@ -1,7 +1,7 @@
 use alvr_common::{parking_lot::Mutex, prelude::*, StrResult};
 use alvr_events::{Event, EventType};
-use alvr_server_io::ServerDataManager;
-use alvr_sockets::{ServerRequest, ServerResponse};
+use alvr_server_data::ServerDataManager;
+use alvr_sockets::{AudioDevicesList, DashboardRequest, ServerResponse};
 use eframe::egui;
 use std::{
     env,
@@ -20,7 +20,7 @@ pub enum ServerEvent {
     PingResponseConnected,
     PingResponseDisconnected,
     Event(alvr_events::Event),
-    ServerResponse(ServerResponse),
+    AudioDevicesUpdated(AudioDevicesList),
     ChannelTest,
 }
 
@@ -92,7 +92,7 @@ fn check_bail(sender: &mpsc::Sender<ServerEvent>) -> StrResult {
 
 pub fn data_interop_thread(
     context: egui::Context,
-    receiver: mpsc::Receiver<ServerRequest>,
+    receiver: mpsc::Receiver<DashboardRequest>,
     sender: mpsc::Sender<ServerEvent>,
 ) {
     let server_data_manager = get_local_data_source();
@@ -182,7 +182,7 @@ pub fn data_interop_thread(
             loop {
                 let response = request_agent
                     .get(&dashboard_request_uri)
-                    .send_json(&ServerRequest::Ping);
+                    .send_json(&DashboardRequest::Ping);
 
                 report_server_status(&context, &sender, &data_source, response.is_ok())?;
 
@@ -203,83 +203,46 @@ pub fn data_interop_thread(
             .send_json(&request)
         {
             Ok(response) => {
-                if let Ok(response) = response.into_json::<ServerResponse>() {
-                    report_event(&context, &sender, ServerEvent::ServerResponse(response)).ok();
+                if let Ok(ServerResponse::AudioDevices(list)) =
+                    response.into_json::<ServerResponse>()
+                {
+                    report_event(&context, &sender, ServerEvent::AudioDevicesUpdated(list)).ok();
                 }
             }
             Err(_) => {
                 if let DataSource::Local(data_manager) = &mut *data_source.lock() {
                     match request {
-                        ServerRequest::Ping => (),
-                        ServerRequest::Log(_) => (),
-                        ServerRequest::GetSession => {
+                        DashboardRequest::GetSession => {
                             report_session(&context, &sender, data_manager);
                         }
-                        ServerRequest::UpdateSession(session) => {
+                        DashboardRequest::UpdateSession(session) => {
                             *data_manager.session_mut() = *session;
 
                             report_session(&context, &sender, data_manager);
                         }
-                        ServerRequest::SetValues(descs) => {
+                        DashboardRequest::SetValues(descs) => {
                             if let Err(e) = data_manager.set_values(descs) {
                                 error!("Failed to set session value: {e}")
                             }
 
                             report_session(&context, &sender, data_manager);
                         }
-                        ServerRequest::UpdateClientList { hostname, action } => {
+                        DashboardRequest::UpdateClientList { hostname, action } => {
                             data_manager.update_client_list(hostname, action);
 
                             report_session(&context, &sender, data_manager);
                         }
-                        ServerRequest::GetAudioDevices => {
+                        DashboardRequest::GetAudioDevices => {
                             if let Ok(list) = data_manager.get_audio_devices_list() {
                                 report_event(
                                     &context,
                                     &sender,
-                                    ServerEvent::ServerResponse(ServerResponse::AudioDevices(list)),
+                                    ServerEvent::AudioDevicesUpdated(list),
                                 )
                                 .ok();
                             }
                         }
-                        ServerRequest::FirewallRules(action) => {
-                            if alvr_server_io::firewall_rules(action).is_ok() {
-                                info!("Setting firewall rules succeeded!");
-                            } else {
-                                error!("Setting firewall rules failed!");
-                            }
-                        }
-                        ServerRequest::RegisterAlvrDriver => {
-                            let alvr_driver_dir =
-                                alvr_filesystem::filesystem_layout_from_dashboard_exe(
-                                    &env::current_exe().unwrap(),
-                                )
-                                .openvr_driver_root_dir;
-
-                            alvr_server_io::driver_registration(&[alvr_driver_dir], true).ok();
-                        }
-                        ServerRequest::UnregisterDriver(path) => {
-                            alvr_server_io::driver_registration(&[path], false).ok();
-                        }
-                        ServerRequest::GetDriverList => {
-                            if let Ok(list) = alvr_server_io::get_registered_drivers() {
-                                report_event(
-                                    &context,
-                                    &sender,
-                                    ServerEvent::ServerResponse(ServerResponse::DriversList(list)),
-                                )
-                                .ok();
-                            }
-                        }
-                        ServerRequest::CaptureFrame
-                        | ServerRequest::InsertIdr
-                        | ServerRequest::StartRecording
-                        | ServerRequest::StopRecording => {
-                            warn!("Cannot perform action, streamer is not connected.")
-                        }
-                        ServerRequest::RestartSteamvr | ServerRequest::ShutdownSteamvr => {
-                            warn!("SteamVR not launched")
-                        }
+                        _ => (),
                     }
                 } else {
                     warn!("Request has been lost!");

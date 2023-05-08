@@ -1,7 +1,6 @@
-use backtrace::Backtrace;
 use serde::{Deserialize, Serialize};
 use settings_schema::SettingsSchema;
-use std::{fmt::Display, future::Future};
+use std::{backtrace::Backtrace, fmt::Display, future::Future};
 
 #[derive(
     SettingsSchema, Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord,
@@ -36,8 +35,8 @@ impl LogSeverity {
 pub fn set_panic_hook() {
     std::panic::set_hook(Box::new(|panic_info| {
         let err_str = format!(
-            "What happened:\n{panic_info}\n\nBacktrace:\n{:?}",
-            Backtrace::new()
+            "What happened:\n{panic_info}\n\nBacktrace:\n{}",
+            Backtrace::force_capture()
         );
 
         log::error!("{err_str}");

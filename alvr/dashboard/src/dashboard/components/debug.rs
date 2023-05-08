@@ -1,24 +1,24 @@
-use alvr_sockets::ServerRequest;
+use alvr_sockets::DashboardRequest;
 use eframe::egui::Ui;
 
-pub fn debug_tab_ui(ui: &mut Ui) -> Option<ServerRequest> {
+pub fn debug_tab_ui(ui: &mut Ui) -> Option<DashboardRequest> {
     let mut request = None;
 
     ui.columns(4, |ui| {
         if ui[0].button("Capture frame").clicked() {
-            request = Some(ServerRequest::CaptureFrame);
+            request = Some(DashboardRequest::CaptureFrame);
         }
 
         if ui[1].button("Insert IDR").clicked() {
-            request = Some(ServerRequest::InsertIdr);
+            request = Some(DashboardRequest::InsertIdr);
         }
 
         if ui[2].button("Start recording").clicked() {
-            request = Some(ServerRequest::StartRecording);
+            request = Some(DashboardRequest::StartRecording);
         }
 
         if ui[3].button("Stop recording").clicked() {
-            request = Some(ServerRequest::StopRecording);
+            request = Some(DashboardRequest::StopRecording);
         }
     });
 

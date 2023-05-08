@@ -3,7 +3,7 @@ use super::{
     presets::{builtin_schema, PresetControl},
     NestingInfo, SettingControl,
 };
-use crate::dashboard::{get_id, ServerRequest};
+use crate::dashboard::{get_id, DashboardRequest};
 use alvr_session::{SessionSettings, Settings};
 use alvr_sockets::AudioDevicesList;
 use eframe::egui::{Grid, ScrollArea, Ui};
@@ -76,7 +76,7 @@ impl SettingsTab {
             .update_session_settings(&self.session_settings_json);
     }
 
-    pub fn ui(&mut self, ui: &mut Ui) -> Option<ServerRequest> {
+    pub fn ui(&mut self, ui: &mut Ui) -> Option<DashboardRequest> {
         let mut requests = vec![];
 
         ui.heading("Presets");
@@ -132,7 +132,7 @@ impl SettingsTab {
             });
 
         if !requests.is_empty() {
-            Some(ServerRequest::SetValues(requests))
+            Some(DashboardRequest::SetValues(requests))
         } else {
             None
         }

@@ -1,5 +1,5 @@
 use crate::{
-    dashboard::ServerRequest,
+    dashboard::DashboardRequest,
     steamvr_launcher::LAUNCHER,
     theme::{self, log_colors},
 };
@@ -34,7 +34,7 @@ impl ConnectionsTab {
         ui: &mut Ui,
         session: &SessionDesc,
         connected_to_server: bool,
-    ) -> Option<ServerRequest> {
+    ) -> Option<DashboardRequest> {
         let mut response = None;
 
         if !connected_to_server {
@@ -83,7 +83,7 @@ impl ConnectionsTab {
                             });
                             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                                 if ui.button("Trust").clicked() {
-                                    response = Some(ServerRequest::UpdateClientList {
+                                    response = Some(DashboardRequest::UpdateClientList {
                                         hostname: hostname.clone(),
                                         action: ClientListAction::Trust,
                                     });
@@ -116,7 +116,7 @@ impl ConnectionsTab {
                             });
                             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                                 if ui.button("Remove").clicked() {
-                                    response = Some(ServerRequest::UpdateClientList {
+                                    response = Some(DashboardRequest::UpdateClientList {
                                         hostname: hostname.clone(),
                                         action: ClientListAction::RemoveEntry,
                                     });
@@ -173,7 +173,7 @@ impl ConnectionsTab {
                                 state.ips.iter().filter_map(|s| s.parse().ok()).collect();
 
                             if state.new_client {
-                                response = Some(ServerRequest::UpdateClientList {
+                                response = Some(DashboardRequest::UpdateClientList {
                                     hostname: state.hostname.clone(),
                                     action: ClientListAction::AddIfMissing {
                                         trusted: true,
@@ -181,7 +181,7 @@ impl ConnectionsTab {
                                     },
                                 });
                             } else {
-                                response = Some(ServerRequest::UpdateClientList {
+                                response = Some(DashboardRequest::UpdateClientList {
                                     hostname: state.hostname.clone(),
                                     action: ClientListAction::SetManualIps(manual_ips),
                                 });

@@ -1,11 +1,12 @@
-use alvr_sockets::{FirewallRulesAction, ServerRequest};
+use crate::firewall;
+use alvr_common::prelude::*;
 use eframe::{
     egui::{Button, Label, Layout, RichText, Ui},
     emath::Align,
 };
 
 pub enum SetupWizardRequest {
-    ServerRequest(ServerRequest),
+    // Dashboard(DashboardRequest),
     Close { finished: bool },
 }
 
@@ -36,7 +37,7 @@ fn page_content(
     ui: &mut Ui,
     subtitle: &str,
     paragraph: &str,
-    interactible_content: impl FnMut(&mut Ui),
+    interactible_content: impl Fn(&mut Ui),
 ) {
     ui.with_layout(Layout::right_to_left(Align::Min), |ui| {
         ui.add_space(60.0);
@@ -65,7 +66,7 @@ impl SetupWizard {
     }
 
     pub fn ui(&mut self, ui: &mut Ui) -> Option<SetupWizardRequest> {
-        let mut request = None;
+        let mut response = None;
 
         ui.horizontal(|ui| {
             ui.add_space(60.0);
@@ -77,7 +78,7 @@ impl SetupWizard {
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 ui.add_space(15.0);
                 if ui.button("❌").clicked() {
-                    request = Some(SetupWizardRequest::Close { finished: false });
+                    response = Some(SetupWizardRequest::Close { finished: false });
                 }
             })
         });
@@ -110,9 +111,11 @@ On Linux some feaures are not working and should be disabled (foveated encoding 
 This requires administrator rights!",
                 |ui| {
                     if ui.button("Add firewall rules").clicked() {
-                        request = Some(SetupWizardRequest::ServerRequest(
-                            ServerRequest::FirewallRules(FirewallRulesAction::Add),
-                        ));
+                        if firewall::firewall_rules(true).is_ok() {
+                            info!("Setting firewall rules succeeded!");
+                        } else {
+                            error!("Setting firewall rules failed!");
+                        }
                     }
                 },
             ),
@@ -125,12 +128,12 @@ This requires administrator rights!",
             //                 ui.horizontal(|ui| {
             //                     // TODO correct preset strings
             //                     if ui.button("Compatibility").clicked() {
-            //                         // request = Some(DashboardRequest::PresetInvocation(
+            //                         // response = Some(DashboardRequest::PresetInvocation(
             //                         //     "compatibility".to_string(),
             //                         // ));
             //                     }
             //                     if ui.button("Visual quality").clicked() {
-            //                         // request = Some(DashboardRequest::PresetInvocation(
+            //                         // response = Some(DashboardRequest::PresetInvocation(
             //                         //     "visual_quality".to_string(),
             //                         // ));
             //                     }
@@ -156,7 +159,7 @@ This requires administrator rights!",
                 ui.add_space(15.0);
                 if self.page == Page::Finished {
                     if ui.button("Finish").clicked() {
-                        request = Some(SetupWizardRequest::Close { finished: true });
+                        response = Some(SetupWizardRequest::Close { finished: true });
                     }
                 } else if ui.button("Next").clicked() {
                     self.page = index_to_page(self.page as usize + 1);
@@ -171,6 +174,6 @@ This requires administrator rights!",
             ui.separator();
         });
 
-        request
+        response
     }
 }

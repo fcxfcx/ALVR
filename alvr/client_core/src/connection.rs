@@ -15,8 +15,7 @@ use alvr_session::{settings_schema::Switch, SessionDesc};
 use alvr_sockets::{
     spawn_cancelable, BatteryPacket, ClientConnectionResult, ClientControlPacket, Haptics,
     PeerType, ProtoControlSocket, ReceiverBuffer, ServerControlPacket, StreamConfigPacket,
-    StreamSocketBuilder, VideoPacketHeader, VideoStreamingCapabilities, AUDIO, HAPTICS, STATISTICS,
-    TRACKING, VIDEO,
+    StreamSocketBuilder, VideoStreamingCapabilities, AUDIO, HAPTICS, STATISTICS, TRACKING, VIDEO,
 };
 use futures::future::BoxFuture;
 use serde_json as json;
@@ -349,9 +348,8 @@ async fn stream_pipeline(
 
     // 接收视频流的loop
     let video_receive_loop = {
-        let mut receiver = stream_socket
-            .subscribe_to_stream::<VideoPacketHeader>(VIDEO)
-            .await?;
+        let mut receiver = stream_socket.subscribe_to_stream::<Duration>(VIDEO).await?;
+        let disconnection_critera = settings.connection.disconnection_criteria;
         async move {
             let _decoder_guard = decoder_guard.lock().await;
 
@@ -380,43 +378,55 @@ async fn stream_pipeline(
 
             // 接收的缓冲区
             let mut receiver_buffer = ReceiverBuffer::new();
-
-            let mut stream_corrupted = false;
-
+            // 超时断连计时器
+            let mut disconnection_timer_begin = None;
+            // 接收信息的循环
             loop {
                 // 从receiver缓冲区中获取信息
                 receiver.recv_buffer(&mut receiver_buffer).await?;
-                let (header, nal) = receiver_buffer.get()?;
+                let (timestamp, nal) = receiver_buffer.get()?;
 
                 if !IS_RESUMED.value() {
                     break Ok(());
                 }
 
                 if let Some(stats) = &mut *STATISTICS_MANAGER.lock() {
-                    stats.report_video_packet_received(header.timestamp);
+                    stats.report_video_packet_received(timestamp);
                 }
+
+                // 把数据压到解码队列的队尾
+                decoder::push_nal(timestamp, nal);
 
                 // 丢包监测
-                if header.is_idr {
-                    stream_corrupted = false;
-                } else if receiver_buffer.had_packet_loss() {
-                    stream_corrupted = true;
+                if receiver_buffer.had_packet_loss() {
                     if let Some(sender) = &*CONTROL_CHANNEL_SENDER.lock() {
-                        sender.send(ClientControlPacket::RequestIdr).ok();
+                        sender.send(ClientControlPacket::VideoErrorReport).ok();
                     }
-                    warn!("Network dropped video packet");
                 }
 
-                if !stream_corrupted || !settings.connection.avoid_video_glitching {
-                    if !decoder::push_nal(header.timestamp, nal) {
-                        stream_corrupted = true;
-                        if let Some(sender) = &*CONTROL_CHANNEL_SENDER.lock() {
-                            sender.send(ClientControlPacket::RequestIdr).ok();
+                // 貌似在做一些QOE方面的检测，涉及到时延阈值与超时断连
+                // todo 但是Switch::Enabled()的用处是？
+                if let Switch::Enabled(criteria) = &disconnection_critera {
+                    if let Some(stats) = &*STATISTICS_MANAGER.lock() {
+                        // 比较预测时延与时延阈值，如果小于就不必继续判断断连超时
+                        if stats.average_total_pipeline_latency()
+                            < Duration::from_millis(criteria.latency_threshold_ms)
+                        {
+                            disconnection_timer_begin = None;
+                        } else {
+                            // 要拿到计时开始的时间
+                            let begin = disconnection_timer_begin.unwrap_or_else(Instant::now);
+
+                            // 判断是否超时
+                            if Instant::now()
+                                > begin + Duration::from_secs(criteria.sustain_duration_s)
+                            {
+                                DISCONNECT_NOTIFIER.notify_one();
+                            }
+
+                            disconnection_timer_begin = Some(begin);
                         }
-                        warn!("Dropped video packet. Reason: Decoder saturation")
                     }
-                } else {
-                    warn!("Dropped video packet. Reason: Waiting for IDR frame")
                 }
             }
         }
