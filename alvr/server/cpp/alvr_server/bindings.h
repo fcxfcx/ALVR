@@ -72,9 +72,9 @@ struct FfiButtonValue {
 };
 
 struct FfiDynamicEncoderParams {
-    unsigned int updated;           // 更新
-    unsigned long long bitrate_bps; // 比特率
-    float framerate;                // 帧率
+    unsigned int updated;
+    unsigned long long bitrate_bps;
+    float framerate;
 };
 
 extern "C" const unsigned char *FRAME_RENDER_VS_CSO_PTR;
@@ -148,5 +148,4 @@ extern "C" void SetButton(unsigned long long path, FfiButtonValue value);
 extern "C" void CaptureFrame();
 
 // NalParsing.cpp
-void ParseFrameNals(
-    int codec, unsigned char *buf, int len, unsigned long long targetTimestampNs);
+void ParseFrameNals(int codec, unsigned char *buf, int len, unsigned long long targetTimestampNs);

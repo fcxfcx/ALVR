@@ -1,7 +1,11 @@
 use alvr_common::{SlidingWindowAverage, HEAD_ID, LEFT_HAND_ID, RIGHT_HAND_ID};
 use alvr_events::{EventType, GraphStatistics, Statistics};
+<<<<<<< Updated upstream
 use alvr_packets::ClientStatistics;
 
+=======
+use alvr_sockets::ClientStatistics;
+>>>>>>> Stashed changes
 use std::{
     collections::{HashMap, VecDeque},
     time::{Duration, Instant},
@@ -224,40 +228,40 @@ impl StatisticsManager {
 
                 let interval_secs = FULL_REPORT_INTERVAL.as_secs_f32();
 
-                alvr_events::send_event(EventType::TargetStatistics(TargetStatistics {
+                alvr_events::send_event(EventType::Statistics(Statistics {
                     video_packets_total: self.video_packets_total,
                     video_packets_per_sec: (self.video_packets_partial_sum as f32 / interval_secs)
                         as _,
                     video_mbytes_total: (self.video_bytes_total as f32 / 1e6) as usize,
                     video_mbits_per_sec: self.video_bytes_partial_sum as f32 / interval_secs * 8.
                         / 1e6,
-                    // total_latency_ms: client_stats.total_pipeline_latency.as_secs_f32() * 1000.,
+                    total_latency_ms: client_stats.total_pipeline_latency.as_secs_f32() * 1000.,
                     network_latency_ms: network_latency.as_secs_f32() * 1000.,
                     encode_latency_ms: encoder_latency.as_secs_f32() * 1000.,
                     decode_latency_ms: client_stats.video_decode.as_secs_f32() * 1000.,
-                    // packets_lost_total: self.packets_lost_total,
-                    // packets_lost_per_sec: (self.packets_lost_partial_sum as f32 / interval_secs)
-                    //     as _,
-                    // client_fps: client_fps as _,
-                    // server_fps: server_fps as _,
-                    // battery_hmd: (self
-                    //     .battery_gauges
-                    //     .get(&HEAD_ID)
-                    //     .cloned()
-                    //     .unwrap_or_default()
-                    //     * 100.) as _,
-                    // battery_left: (self
-                    //     .battery_gauges
-                    //     .get(&LEFT_HAND_ID)
-                    //     .cloned()
-                    //     .unwrap_or_default()
-                    //     * 100.) as _,
-                    // battery_right: (self
-                    //     .battery_gauges
-                    //     .get(&RIGHT_HAND_ID)
-                    //     .cloned()
-                    //     .unwrap_or_default()
-                    //     * 100.) as _,
+                    packets_lost_total: self.packets_lost_total,
+                    packets_lost_per_sec: (self.packets_lost_partial_sum as f32 / interval_secs)
+                        as _,
+                    client_fps: client_fps as _,
+                    server_fps: server_fps as _,
+                    battery_hmd: (self
+                        .battery_gauges
+                        .get(&HEAD_ID)
+                        .cloned()
+                        .unwrap_or_default()
+                        * 100.) as _,
+                    battery_left: (self
+                        .battery_gauges
+                        .get(&LEFT_HAND_ID)
+                        .cloned()
+                        .unwrap_or_default()
+                        * 100.) as _,
+                    battery_right: (self
+                        .battery_gauges
+                        .get(&RIGHT_HAND_ID)
+                        .cloned()
+                        .unwrap_or_default()
+                        * 100.) as _,
                 }));
 
                 self.video_packets_partial_sum = 0;
