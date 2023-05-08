@@ -461,7 +461,7 @@ fn try_connect(
                         fps,
                         frame_interval_sender
                     ) => {
-                        show_warn(res);
+                        warn!("Connection interrupted: {res:?}");
                     },
                     _ = DISCONNECT_CLIENT_NOTIFIER.notified() => (),
                     _ = shutdown_detector => (),
@@ -696,11 +696,12 @@ async fn connection_pipeline(
     let video_send_loop = {
         let mut socket_sender = stream_socket.request_stream(VIDEO).await?;
         async move {
-            let (data_sender, mut data_receiver) = tmpsc::unbounded_channel();
+            let (data_sender, mut data_receiver) =
+                tmpsc::channel(settings.connection.max_queued_server_video_frames);
             *VIDEO_SENDER.lock() = Some(data_sender);
 
-            while let Some(VideoPacket { timestamp, payload }) = data_receiver.recv().await {
-                socket_sender.send(&timestamp, payload).await.ok();
+            while let Some(VideoPacket { header, payload }) = data_receiver.recv().await {
+                socket_sender.send(&header, payload).await.ok();
             }
 
             Ok(())
@@ -774,6 +775,11 @@ async fn connection_pipeline(
             } else {
                 None
             };
+
+            let mut track_controllers = 0u32;
+            if let Switch::Enabled(config) = settings.headset.controllers {
+                track_controllers = config.tracked.into();
+            }
 
             loop {
                 let tracking = receiver.recv_header_only().await?;
@@ -860,6 +866,7 @@ async fn connection_pipeline(
                             } else {
                                 ptr::null()
                             },
+                            track_controllers,
                         )
                     };
                 }

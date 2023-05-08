@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 use std::{
     fmt::{self, Debug},
     net::IpAddr,
+    path::PathBuf,
     time::Duration,
 };
 
@@ -99,6 +100,12 @@ pub struct FaceData {
     pub fb_face_expression: Option<Vec<f32>>, // issue: Serialize does not support [f32; 63]
     pub htc_eye_expression: Option<Vec<f32>>,
     pub htc_lip_expression: Option<Vec<f32>>, // issue: Serialize does not support [f32; 37]
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct VideoPacketHeader {
+    pub timestamp: Duration,
+    pub is_idr: bool,
 }
 
 // Note: face_data does not respect target_timestamp.
@@ -202,7 +209,13 @@ pub struct PathValuePair {
 }
 
 #[derive(Serialize, Deserialize, Debug)]
-pub enum DashboardRequest {
+pub enum FirewallRulesAction {
+    Add,
+    Remove,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+pub enum ServerRequest {
     Ping,
     Log(LogEvent),
     GetSession,
@@ -217,6 +230,10 @@ pub enum DashboardRequest {
     InsertIdr,
     StartRecording,
     StopRecording,
+    FirewallRules(FirewallRulesAction),
+    RegisterAlvrDriver,
+    UnregisterDriver(PathBuf),
+    GetDriverList,
     RestartSteamvr,
     ShutdownSteamvr,
 }
@@ -224,4 +241,5 @@ pub enum DashboardRequest {
 #[derive(Serialize, Deserialize, Debug)]
 pub enum ServerResponse {
     AudioDevices(AudioDevicesList),
+    DriversList(Vec<PathBuf>),
 }
