@@ -19,7 +19,7 @@ use alvr_common::{
     settings_schema::Switch,
     RelaxedAtomic, DEVICE_ID_TO_PATH, HEAD_ID, LEFT_HAND_ID, RIGHT_HAND_ID,
 };
-use alvr_events::{ButtonEvent, ButtonValue, EventType, HapticsEvent, TrackingEvent};
+use alvr_events::{ButtonEvent, ButtonValue, EventType, HapticsEvent, TrackingEvent, MotionStatistics, NetworkStatistics};
 use alvr_packets::{
     ClientConnectionResult, ClientControlPacket, ClientListAction, ClientStatistics,
     ServerControlPacket, StreamConfigPacket, Tracking, AUDIO, HAPTICS, STATISTICS, TRACKING, VIDEO,
@@ -38,7 +38,7 @@ use std::{
     ptr,
     sync::{mpsc as smpsc, Arc},
     thread,
-    time::Duration,
+    time::{Duration,Instant}
 };
 use tokio::{
     runtime::Runtime,
@@ -783,6 +783,9 @@ async fn connection_pipeline(
                 track_controllers = config.tracked.into();
             }
 
+            // 每0.5s报告一次位置信息
+            let mut last_report_instant = Instant::now();
+            const FULL_REPORT_INTERVAL: Duration = Duration::from_millis(500);
             loop {
                 let tracking = receiver.recv_header_only().await?;
 
@@ -833,6 +836,17 @@ async fn connection_pipeline(
                     })))
                 }
 
+                if last_report_instant + FULL_REPORT_INTERVAL < Instant::now(){
+                    last_report_instant += FULL_REPORT_INTERVAL;
+                    let head_tracking = motions.iter()
+                    .find(|(id, _)| *id == *HEAD_ID)
+                    .map(|(_, m)| *m);
+                    alvr_events::send_event(EventType::MotionStatistics(MotionStatistics{
+                        orientation: head_tracking.unwrap().pose.orientation,
+                        position: head_tracking.unwrap().pose.position
+                    }))
+                }
+
                 if let Some(sink) = &face_tracking_sink {
                     let mut face_data = tracking.face_data;
                     face_data.eye_gazes = local_eye_gazes;
@@ -881,6 +895,9 @@ async fn connection_pipeline(
             .subscribe_to_stream::<ClientStatistics>(STATISTICS)
             .await?;
         async move {
+            // 每0.5s报告一次
+            let mut last_report_instant = Instant::now();
+            const FULL_REPORT_INTERVAL: Duration = Duration::from_millis(500);
             loop {
                 let client_stats = receiver.recv_header_only().await?;
 
@@ -894,6 +911,14 @@ async fn connection_pipeline(
                         network_latency,
                         decoder_latency,
                     );
+                }
+
+                if last_report_instant + FULL_REPORT_INTERVAL < Instant::now(){
+                    last_report_instant += FULL_REPORT_INTERVAL;
+                    alvr_events::send_event(EventType::NetworkStatistics(NetworkStatistics{
+                        video_mbits_per_sec: BITRATE_MANAGER.lock().get_bitrate_last_interval(),
+                    }));
+                    BITRATE_MANAGER.lock().clear_bitrate_last_interval()
                 }
             }
         }

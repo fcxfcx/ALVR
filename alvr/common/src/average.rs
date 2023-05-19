@@ -26,6 +26,10 @@ impl SlidingWindowAverage<f32> {
     pub fn get_average(&self) -> f32 {
         self.history_buffer.iter().sum::<f32>() / self.history_buffer.len() as f32
     }
+
+    pub fn clear(&mut self) {
+        self.history_buffer.clear()
+    }
 }
 
 impl SlidingWindowAverage<Duration> {

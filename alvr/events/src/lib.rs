@@ -1,4 +1,4 @@
-use alvr_common::{prelude::*, DeviceMotion, Pose};
+use alvr_common::{prelude::*, DeviceMotion, Pose, glam::{Quat, Vec3}};
 use alvr_session::SessionDesc;
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
@@ -22,20 +22,21 @@ pub struct Statistics {
     pub battery_right: u32,
 }
 
+// 下面的NetworkStatistics，BitrateSelection和MotionStatistics是额外添加的三个关注数据
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
-pub struct TargetStatistics {
-    pub video_packets_total: usize,
-    pub video_packets_per_sec: usize,
-    pub video_mbytes_total: usize,
+pub struct NetworkStatistics {
     pub video_mbits_per_sec: f32,
-    pub network_latency_ms: f32,
-    pub encode_latency_ms: f32,
-    pub decode_latency_ms: f32,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
 pub struct BitrateSelection {
     pub bitrate_bps: u64,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, Default)]
+pub struct MotionStatistics{
+    pub orientation: Quat,
+    pub position: Vec3,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
@@ -101,8 +102,9 @@ pub enum EventType {
     Haptics(HapticsEvent),
     ServerRequestsSelfRestart,
     Log(LogEvent),
-    TargetStatistics(TargetStatistics),
+    NetworkStatistics(NetworkStatistics),
     BitrateSelection(BitrateSelection),
+    MotionStatistics(MotionStatistics)
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -114,10 +116,13 @@ pub struct Event {
 pub fn send_event(event_type: EventType) {
     // only send the data we want to the log file
     match event_type {
-        EventType::TargetStatistics(_) => {
+        EventType::NetworkStatistics(_) => {
             info!("{}", serde_json::to_string(&event_type).unwrap());
         }
-        EventType::BitrateSelection(_) => {
+        // EventType::BitrateSelection(_) => {
+        //     info!("{}", serde_json::to_string(&event_type).unwrap());
+        // }
+        EventType::MotionStatistics(_) => {
             info!("{}", serde_json::to_string(&event_type).unwrap());
         }
         _ => {

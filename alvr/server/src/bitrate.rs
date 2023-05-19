@@ -21,6 +21,7 @@ pub struct BitrateManager {
     last_update_instant: Instant,                            //上一次更新
     dynamic_max_bitrate: f32,                                //新增：动态最大比特率
     update_needed: bool,                                     //更新需求
+    bitrate_last_interval : SlidingWindowAverage<f32>
 }
 
 impl BitrateManager {
@@ -44,6 +45,7 @@ impl BitrateManager {
             last_update_instant: Instant::now(),
             dynamic_max_bitrate: f32::MAX,
             update_needed: true,
+            bitrate_last_interval: SlidingWindowAverage::new(30_000_000.0, max_history_size)
         }
     }
 
@@ -96,7 +98,7 @@ impl BitrateManager {
             if timestamp_ == timestamp {
                 self.bitrate_average
                     .submit_sample(size_bits as f32 / network_latency.as_secs_f32());
-
+                self.bitrate_last_interval.submit_sample(size_bits as f32 / network_latency.as_secs_f32());
                 self.packet_sizes_bits_history.pop_front();
 
                 break;
@@ -195,5 +197,13 @@ impl BitrateManager {
             bitrate_bps: bitrate_bps as u64,
             framerate,
         }
+    }
+
+    pub fn get_bitrate_last_interval(&mut self)-> f32{
+        return self.bitrate_last_interval.get_average()
+    }
+
+    pub fn clear_bitrate_last_interval(&mut self) {
+        self.bitrate_last_interval.clear()
     }
 }
