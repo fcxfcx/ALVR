@@ -47,6 +47,7 @@ use tokio::{
 };
 
 const RETRY_CONNECT_MIN_INTERVAL: Duration = Duration::from_secs(1);
+const FULL_REPORT_INTERVAL: Duration = Duration::from_millis(500);
 
 static CONNECTED_CLIENT_HOSTNAMES: Lazy<parking_lot::Mutex<HashSet<String>>> =
     Lazy::new(|| parking_lot::Mutex::new(HashSet::new()));
@@ -785,7 +786,7 @@ async fn connection_pipeline(
 
             // 每0.5s报告一次位置信息
             let mut last_report_instant = Instant::now();
-            const FULL_REPORT_INTERVAL: Duration = Duration::from_millis(500);
+
             loop {
                 let tracking = receiver.recv_header_only().await?;
 
@@ -895,9 +896,7 @@ async fn connection_pipeline(
             .subscribe_to_stream::<ClientStatistics>(STATISTICS)
             .await?;
         async move {
-            // 每0.5s报告一次
             let mut last_report_instant = Instant::now();
-            const FULL_REPORT_INTERVAL: Duration = Duration::from_millis(500);
             loop {
                 let client_stats = receiver.recv_header_only().await?;
 
@@ -916,7 +915,7 @@ async fn connection_pipeline(
                 if last_report_instant + FULL_REPORT_INTERVAL < Instant::now(){
                     last_report_instant += FULL_REPORT_INTERVAL;
                     alvr_events::send_event(EventType::NetworkStatistics(NetworkStatistics{
-                        video_mbits_per_sec: BITRATE_MANAGER.lock().get_bitrate_last_interval(),
+                        video_mbits_per_sec: BITRATE_MANAGER.lock().get_bitrate_last_interval() / 1e6,
                     }));
                     BITRATE_MANAGER.lock().clear_bitrate_last_interval()
                 }
