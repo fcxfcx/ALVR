@@ -94,7 +94,6 @@ pub enum EventType {
     AudioDevices(AudioDevicesList),
     DriversList(Vec<PathBuf>),
     ServerRequestsSelfRestart,
-    Log(LogEvent),
     NetworkStatistics(NetworkStatistics),
     BitrateSelection(BitrateSelection),
     MotionStatistics(MotionStatistics)
