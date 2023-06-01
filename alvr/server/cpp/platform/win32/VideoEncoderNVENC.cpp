@@ -249,6 +249,7 @@ void VideoEncoderNVENC::FillEncodeConfig(NV_ENC_INITIALIZE_PARAMS &initializePar
 			break;
 		case ALVR_VBR:
 			encodeConfig.rcParams.rateControlMode = NV_ENC_PARAMS_RC_VBR;
+			encodeConfig.rcParams.targetQuality = 20;
 			break;
 	}
 	encodeConfig.rcParams.multiPass = static_cast<NV_ENC_MULTI_PASS>(Settings::Instance().m_nvencMultiPass);

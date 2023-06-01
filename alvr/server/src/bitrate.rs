@@ -11,19 +11,19 @@ use std::{
 const UPDATE_INTERVAL: Duration = Duration::from_secs(1);
 
 pub struct BitrateManager {
-    nominal_framerate: f32,
-    max_history_size: usize,
-    frame_interval_average: SlidingWindowAverage<Duration>,
-    packet_sizes_bits_history: VecDeque<(Duration, usize)>,
-    network_latency_average: SlidingWindowAverage<Duration>,
-    bitrate_average: SlidingWindowAverage<f32>,
-    decoder_latency_overstep_count: usize,
-    last_frame_instant: Instant,
-    last_update_instant: Instant,
-    dynamic_max_bitrate: f32,
-    update_needed: bool,
-    bitrate_last_interval : SlidingWindowAverage<f32>
-
+    nominal_framerate: f32,                                  //新增：帧率
+    max_history_size: usize,                                 //新增：历史最大值
+    frame_interval_average: SlidingWindowAverage<Duration>,  //帧间隔平均值
+    packet_sizes_bits_history: VecDeque<(Duration, usize)>,  //新增：历史包大小记录
+    network_latency_average: SlidingWindowAverage<Duration>, //网络延迟平均值
+    bitrate_average: SlidingWindowAverage<f32>,              //新增：平均比特率
+    decoder_latency_overstep_count: usize,                   //新增：解码延迟计数器
+    last_frame_instant: Instant,                             //上一帧的时刻
+    last_update_instant: Instant,                            //上一次更新
+    dynamic_max_bitrate: f32,                                //新增：动态最大比特率
+    update_needed: bool,                                     //更新需求
+    bitrate_last_interval : VecDeque<f32>,       //上一个统计间隔内的带宽值
+    data_last_interval : VecDeque<f32>           //上一个统计间隔内的数据量
 }
 
 impl BitrateManager {
@@ -46,7 +46,8 @@ impl BitrateManager {
             last_update_instant: Instant::now(),
             dynamic_max_bitrate: f32::MAX,
             update_needed: true,
-            bitrate_last_interval: SlidingWindowAverage::new(30_000_000.0, max_history_size)
+            bitrate_last_interval: VecDeque::new(),
+            data_last_interval: VecDeque::new()
         }
     }
 
@@ -100,7 +101,8 @@ impl BitrateManager {
             if timestamp_ == timestamp {
                 self.bitrate_average
                     .submit_sample(size_bits as f32 / network_latency.as_secs_f32());
-                self.bitrate_last_interval.submit_sample(size_bits as f32 / network_latency.as_secs_f32());
+                self.bitrate_last_interval.push_back(size_bits as f32 / network_latency.as_secs_f32());
+                self.data_last_interval.push_back(size_bits as f32);
                 self.packet_sizes_bits_history.pop_front();
 
                 break;
@@ -199,11 +201,16 @@ impl BitrateManager {
         }
     }
 
-    pub fn get_bitrate_last_interval(&mut self)-> f32{
-        return self.bitrate_last_interval.get_average()
+    pub fn get_bitrate_last_interval(& self)-> f32{
+        return self.bitrate_last_interval.iter().sum::<f32>() / self.bitrate_last_interval.len() as f32
     }
 
-    pub fn clear_bitrate_last_interval(&mut self) {
-        self.bitrate_last_interval.clear()
+    pub fn get_data_last_interval(&self) -> f32{
+        return self.data_last_interval.iter().sum::<f32>()
     }
+    pub fn clear_last_interval(&mut self) {
+        self.bitrate_last_interval.clear();
+        self.data_last_interval.clear()
+    }
+
 }

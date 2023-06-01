@@ -867,7 +867,7 @@ async fn connection_pipeline(
                     alvr_events::send_event(EventType::MotionStatistics(MotionStatistics{
                         orientation: head_tracking.unwrap().pose.orientation,
                         position: head_tracking.unwrap().pose.position
-                    }))
+                    }));
                 }
 
                 if let Some(sink) = &face_tracking_sink {
@@ -918,15 +918,13 @@ async fn connection_pipeline(
             .subscribe_to_stream::<ClientStatistics>(STATISTICS)
             .await?;
         async move {
-            let mut last_report_instant = Instant::now();
             loop {
                 let client_stats = receiver.recv_header_only().await?;
-
+                let mut last_report_instant = Instant::now();
                 if let Some(stats) = &mut *STATISTICS_MANAGER.lock() {
                     let timestamp = client_stats.target_timestamp;
                     let decoder_latency = client_stats.video_decode;
                     let network_latency = stats.report_statistics(client_stats);
-
                     BITRATE_MANAGER.lock().report_frame_latencies(
                         &SERVER_DATA_MANAGER.read().settings().video.bitrate.mode,
                         timestamp,
@@ -937,10 +935,13 @@ async fn connection_pipeline(
 
                 if last_report_instant + FULL_REPORT_INTERVAL < Instant::now(){
                     last_report_instant += FULL_REPORT_INTERVAL;
+                    let mut bitrate_lock = BITRATE_MANAGER.lock();
                     alvr_events::send_event(EventType::NetworkStatistics(NetworkStatistics{
-                        video_mbits_per_sec: BITRATE_MANAGER.lock().get_bitrate_last_interval() / 1e6,
+                        video_mbits_per_sec: bitrate_lock.get_bitrate_last_interval() / 1e6,
+                        data_bits : bitrate_lock.get_data_last_interval()
                     }));
-                    BITRATE_MANAGER.lock().clear_bitrate_last_interval()
+                    bitrate_lock.clear_last_interval();
+                    drop(bitrate_lock)
                 }
             }
         }

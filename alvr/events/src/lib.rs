@@ -27,6 +27,7 @@ pub struct Statistics {
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
 pub struct NetworkStatistics {
     pub video_mbits_per_sec: f32,
+    pub data_bits: f32
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
