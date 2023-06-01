@@ -123,6 +123,7 @@ extern "C" void (*ReportEncoded)(unsigned long long timestamp_ns);
 extern "C" FfiDynamicEncoderParams (*GetDynamicEncoderParams)();
 extern "C" unsigned long long (*GetSerialNumber)(unsigned long long deviceID, char *outString);
 extern "C" void (*SetOpenvrProps)(unsigned long long deviceID);
+extern "C" void (*WaitForVSync)();
 
 extern "C" void *CppEntryPoint(const char *pInterfaceName, int *pReturnCode);
 extern "C" void InitializeStreaming();
@@ -148,4 +149,5 @@ extern "C" void SetButton(unsigned long long path, FfiButtonValue value);
 extern "C" void CaptureFrame();
 
 // NalParsing.cpp
-void ParseFrameNals(int codec, unsigned char *buf, int len, unsigned long long targetTimestampNs);
+void ParseFrameNals(
+    int codec, unsigned char *buf, int len, unsigned long long targetTimestampNs, bool isIdr);

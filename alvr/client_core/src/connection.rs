@@ -23,6 +23,7 @@ use alvr_sockets::{
 use futures::future::BoxFuture;
 use serde_json as json;
 use std::{
+    collections::HashMap,
     future,
     net::IpAddr,
     sync::Arc,
@@ -170,6 +171,7 @@ fn connection_pipeline(
     runtime
         .block_on(
             proto_control_socket.send(&ClientConnectionResult::ConnectionAccepted {
+                client_protocol_id: alvr_common::protocol_id(),
                 display_name: platform::device_model(),
                 server_ip,
                 streaming_capabilities: Some(VideoStreamingCapabilities {
@@ -205,15 +207,31 @@ async fn stream_pipeline(
     // settings对象里保存了之前server发过来的流配置信息
     let settings = {
         let mut session_desc = SessionDesc::default();
-        session_desc
-            .merge_from_json(&json::from_str(&stream_config.session_desc).map_err(err!())?)?;
+        session_desc.merge_from_json(&json::from_str(&stream_config.session).map_err(err!())?)?;
         session_desc.to_settings()
     };
 
+
     // 流开始事件保存了一些信息
+    let negotiated_config =
+        json::from_str::<HashMap<String, json::Value>>(&stream_config.negotiated)
+            .map_err(err!())?;
+
+    let view_resolution = negotiated_config
+        .get("view_resolution")
+        .and_then(|v| json::from_value(v.clone()).ok())
+        .unwrap_or(UVec2::ZERO);
+    let refresh_rate_hint = negotiated_config
+        .get("refresh_rate_hint")
+        .and_then(|v| v.as_f64())
+        .unwrap_or(60.0) as f32;
+    let game_audio_sample_rate = negotiated_config
+        .get("game_audio_sample_rate")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(44100) as u32;
     let streaming_start_event = ClientCoreEvent::StreamingStarted {
-        view_resolution: stream_config.view_resolution,
-        refresh_rate_hint: stream_config.fps,
+        view_resolution,
+        refresh_rate_hint,
         settings: Box::new(settings.clone()),
     };
 
@@ -249,7 +267,7 @@ async fn stream_pipeline(
 
     *STATISTICS_MANAGER.lock() = Some(StatisticsManager::new(
         settings.connection.statistics_history_size as _,
-        Duration::from_secs_f32(1.0 / stream_config.fps),
+        Duration::from_secs_f32(1.0 / refresh_rate_hint),
         if let Switch::Enabled(config) = settings.headset.controllers {
             config.steamvr_pipeline_frames
         } else {
@@ -451,7 +469,7 @@ async fn stream_pipeline(
         Box::pin(audio::play_audio_loop(
             device,
             2,
-            stream_config.game_audio_sample_rate,
+            game_audio_sample_rate,
             config.buffering,
             game_audio_receiver,
         ))

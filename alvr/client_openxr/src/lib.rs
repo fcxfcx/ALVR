@@ -3,7 +3,6 @@ mod interaction;
 use alvr_client_core::{opengl::RenderViewInput, ClientCoreEvent};
 use alvr_common::{
     glam::{Quat, UVec2, Vec2, Vec3},
-    parking_lot::{Mutex, RwLock},
     prelude::*,
     settings_schema::Switch,
     DeviceMotion, Fov, Pose, RelaxedAtomic, HEAD_ID, LEFT_HAND_ID, RIGHT_HAND_ID,
@@ -16,7 +15,7 @@ use std::{
     collections::VecDeque,
     path::Path,
     ptr,
-    sync::Arc,
+    sync::{mpsc, Arc},
     thread,
     time::{Duration, Instant},
 };
@@ -41,18 +40,12 @@ struct HistoryView {
 
 struct StreamingInputContext {
     platform: Platform,
-    is_streaming: Arc<RelaxedAtomic>,
-    frame_interval: Duration,
     xr_instance: xr::Instance,
     xr_session: xr::Session<xr::AnyGraphics>,
     hands_context: Arc<HandsInteractionContext>,
     face_context: Option<FaceInputContext>,
-    reference_space: Arc<RwLock<xr::Space>>,
-    views_history: Arc<Mutex<VecDeque<HistoryView>>>,
-}
-
-#[derive(Default)]
-struct StreamingInputState {
+    history_view_sender: mpsc::Sender<HistoryView>,
+    reference_space: Arc<xr::Space>,
     last_ipd: f32,
     last_hand_positions: [Vec3; 2],
 }
@@ -193,107 +186,127 @@ fn create_xr_session(
 pub fn create_swapchain(
     session: &xr::Session<xr::OpenGlEs>,
     resolution: UVec2,
+    foveation: Option<&xr::FoveationProfileFB>,
 ) -> xr::Swapchain<xr::OpenGlEs> {
-    session
-        .create_swapchain(&xr::SwapchainCreateInfo {
-            create_flags: xr::SwapchainCreateFlags::EMPTY,
-            usage_flags: xr::SwapchainUsageFlags::COLOR_ATTACHMENT
-                | xr::SwapchainUsageFlags::SAMPLED,
-            format: glow::SRGB8_ALPHA8,
-            sample_count: 1,
-            width: resolution.x,
-            height: resolution.y,
-            face_count: 1,
-            array_size: 1,
-            mip_count: 1,
-        })
-        .unwrap()
+    let swapchain_info = xr::SwapchainCreateInfo {
+        create_flags: xr::SwapchainCreateFlags::EMPTY,
+        usage_flags: xr::SwapchainUsageFlags::COLOR_ATTACHMENT | xr::SwapchainUsageFlags::SAMPLED,
+        format: glow::SRGB8_ALPHA8,
+        sample_count: 1,
+        width: resolution.x,
+        height: resolution.y,
+        face_count: 1,
+        array_size: 1,
+        mip_count: 1,
+    };
+
+    if let Some(foveation) = foveation {
+        let swapchain = session
+            .create_swapchain_with_foveation(
+                &swapchain_info,
+                xr::SwapchainCreateFoveationFlagsFB::SCALED_BIN,
+            )
+            .unwrap();
+
+        swapchain.update_foveation(foveation).unwrap();
+
+        swapchain
+    } else {
+        session.create_swapchain(&swapchain_info).unwrap()
+    }
 }
 
 // This function is allowed to return errors. It can happen when the session is destroyed
 // asynchronously
-fn update_streaming_input(
-    ctx: &StreamingInputContext,
-    state: &mut StreamingInputState,
-) -> StrResult {
+fn update_streaming_input(ctx: &mut StreamingInputContext) {
     // Streaming related inputs are updated here. Make sure every input poll is done in this
     // thread
-    ctx.xr_session
+    if let Err(e) = ctx
+        .xr_session
         .sync_actions(&[(&ctx.hands_context.action_set).into()])
-        .map_err(err!())?;
+    {
+        error!("{e}");
+        return;
+    }
 
-    let now = xr_runtime_now(&ctx.xr_instance, ctx.platform).ok_or_else(enone!())?;
+    let Some(now) = xr_runtime_now(&ctx.xr_instance) else {
+        error!("Cannot poll tracking: invalid time");
+        return;
+    };
 
     // 头部预测？？
     let target_timestamp = now + alvr_client_core::get_head_prediction_offset();
 
-    let (view_flags, views) = ctx
-        .xr_session
-        .locate_views(
-            xr::ViewConfigurationType::PRIMARY_STEREO,
-            to_xr_time(target_timestamp),
-            &ctx.reference_space.read(),
-        )
-        .map_err(err!())?;
+    let mut device_motions = Vec::with_capacity(3);
 
-    if !view_flags.contains(xr::ViewStateFlags::POSITION_VALID)
-        || !view_flags.contains(xr::ViewStateFlags::ORIENTATION_VALID)
-    {
-        return Ok(());
-    }
+    'head_tracking: {
+        let Ok((view_flags, views)) = ctx
+            .xr_session
+            .locate_views(
+                xr::ViewConfigurationType::PRIMARY_STEREO,
+                to_xr_time(target_timestamp),
+                &ctx.reference_space,
+            )
+        else {
+            error!("Cannot locate views");
+            break 'head_tracking;
+        };
 
-    let ipd = (to_vec3(views[0].pose.position) - to_vec3(views[1].pose.position)).length();
-    if f32::abs(state.last_ipd - ipd) > IPD_CHANGE_EPS {
-        alvr_client_core::send_views_config([to_fov(views[0].fov), to_fov(views[1].fov)], ipd);
-
-        state.last_ipd = ipd;
-    }
-
-    // Note: Here is assumed that views are on the same plane and orientation. The head position
-    // is approximated as the center point between the eyes.
-    let head_position = (to_vec3(views[0].pose.position) + to_vec3(views[1].pose.position)) / 2.0;
-    let head_orientation = to_quat(views[0].pose.orientation);
-
-    {
-        let mut views_history_lock = ctx.views_history.lock();
-
-        views_history_lock.push_back(HistoryView {
-            timestamp: target_timestamp,
-            views,
-        });
-        if views_history_lock.len() > 360 {
-            views_history_lock.pop_front();
+        if !view_flags.contains(xr::ViewStateFlags::POSITION_VALID)
+            || !view_flags.contains(xr::ViewStateFlags::ORIENTATION_VALID)
+        {
+            break 'head_tracking;
         }
+
+        let ipd = (to_vec3(views[0].pose.position) - to_vec3(views[1].pose.position)).length();
+        if f32::abs(ctx.last_ipd - ipd) > IPD_CHANGE_EPS {
+            alvr_client_core::send_views_config([to_fov(views[0].fov), to_fov(views[1].fov)], ipd);
+
+            ctx.last_ipd = ipd;
+        }
+
+        // Note: Here is assumed that views are on the same plane and orientation. The head position
+        // is approximated as the center point between the eyes.
+        let head_position =
+            (to_vec3(views[0].pose.position) + to_vec3(views[1].pose.position)) / 2.0;
+        let head_orientation = to_quat(views[0].pose.orientation);
+
+        ctx.history_view_sender
+            .send(HistoryView {
+                timestamp: target_timestamp,
+                views,
+            })
+            .ok();
+
+        device_motions.push((
+            *HEAD_ID,
+            DeviceMotion {
+                pose: Pose {
+                    orientation: head_orientation,
+                    position: head_position,
+                },
+                linear_velocity: Vec3::ZERO,
+                angular_velocity: Vec3::ZERO,
+            },
+        ));
     }
 
     let tracker_time = to_xr_time(now + alvr_client_core::get_tracker_prediction_offset());
 
-    let mut device_motions = vec![(
-        *HEAD_ID,
-        DeviceMotion {
-            pose: Pose {
-                orientation: head_orientation,
-                position: head_position,
-            },
-            linear_velocity: Vec3::ZERO,
-            angular_velocity: Vec3::ZERO,
-        },
-    )];
-
     let (left_hand_motion, left_hand_skeleton) = interaction::get_hand_motion(
         &ctx.xr_session,
-        &ctx.reference_space.read(),
+        &ctx.reference_space,
         tracker_time,
         &ctx.hands_context.hand_sources[0],
-        &mut state.last_hand_positions[0],
-    )?;
+        &mut ctx.last_hand_positions[0],
+    );
     let (right_hand_motion, right_hand_skeleton) = interaction::get_hand_motion(
         &ctx.xr_session,
-        &ctx.reference_space.read(),
+        &ctx.reference_space,
         tracker_time,
         &ctx.hands_context.hand_sources[1],
-        &mut state.last_hand_positions[1],
-    )?;
+        &mut ctx.last_hand_positions[1],
+    );
 
     if let Some(motion) = left_hand_motion {
         device_motions.push((*LEFT_HAND_ID, motion));
@@ -304,11 +317,7 @@ fn update_streaming_input(
 
     let face_data = if let Some(context) = &ctx.face_context {
         FaceData {
-            eye_gazes: interaction::get_eye_gazes(
-                context,
-                &ctx.reference_space.read(),
-                to_xr_time(now),
-            ),
+            eye_gazes: interaction::get_eye_gazes(context, &ctx.reference_space, to_xr_time(now)),
             fb_face_expression: interaction::get_fb_face_expression(context, to_xr_time(now)),
             htc_eye_expression: interaction::get_htc_eye_expression(context),
             htc_lip_expression: interaction::get_htc_lip_expression(context),
@@ -324,11 +333,14 @@ fn update_streaming_input(
         face_data,
     });
 
-    interaction::update_buttons(
+    let button_entries = interaction::update_buttons(
         ctx.platform,
         &ctx.xr_session,
         &ctx.hands_context.button_actions,
-    )
+    );
+    if !button_entries.is_empty() {
+        alvr_client_core::send_buttons(button_entries);
+    }
 }
 
 pub fn entry_point() {
@@ -369,6 +381,9 @@ pub fn entry_point() {
     exts.fb_display_refresh_rate = available_extensions.fb_display_refresh_rate;
     exts.fb_eye_tracking_social = available_extensions.fb_eye_tracking_social;
     exts.fb_face_tracking = available_extensions.fb_face_tracking;
+    exts.fb_foveation = available_extensions.fb_foveation;
+    exts.fb_foveation_configuration = available_extensions.fb_foveation_configuration;
+    exts.fb_swapchain_update_state = available_extensions.fb_swapchain_update_state;
     exts.htc_facial_tracking = available_extensions.htc_facial_tracking;
     exts.htc_vive_focus3_controller_interaction =
         available_extensions.htc_vive_focus3_controller_interaction;
@@ -436,19 +451,21 @@ pub fn entry_point() {
             &xr_session.clone().into_any_graphics(),
         ));
 
-        let reference_space = Arc::new(RwLock::new(
+        let is_streaming = Arc::new(RelaxedAtomic::new(false));
+
+        let mut reference_space = Arc::new(
             xr_session
                 .create_reference_space(xr::ReferenceSpaceType::STAGE, xr::Posef::IDENTITY)
                 .unwrap(),
-        ));
-
-        let is_streaming = Arc::new(RelaxedAtomic::new(false));
-
+        );
         let mut lobby_swapchains = None;
         let mut stream_swapchains = None;
         let mut stream_view_resolution = UVec2::ZERO;
         let mut streaming_input_thread = None::<thread::JoinHandle<_>>;
-        let views_history = Arc::new(Mutex::new(VecDeque::new()));
+        let mut views_history = VecDeque::new();
+
+        let (history_view_sender, history_view_receiver) = mpsc::channel();
+        let mut reference_space_sender = None::<mpsc::Sender<_>>;
 
         let default_view = xr::View {
             pose: xr::Posef {
@@ -486,8 +503,16 @@ pub fn entry_point() {
 
                             let swapchains = lobby_swapchains.get_or_insert_with(|| {
                                 [
-                                    create_swapchain(&xr_session, recommended_view_resolution),
-                                    create_swapchain(&xr_session, recommended_view_resolution),
+                                    create_swapchain(
+                                        &xr_session,
+                                        recommended_view_resolution,
+                                        None,
+                                    ),
+                                    create_swapchain(
+                                        &xr_session,
+                                        recommended_view_resolution,
+                                        None,
+                                    ),
                                 ]
                             });
 
@@ -540,17 +565,23 @@ pub fn entry_point() {
                         _ => (),
                     },
                     xr::Event::ReferenceSpaceChangePending(event) => {
-                        error!(
+                        info!(
                             "ReferenceSpaceChangePending type: {:?}",
                             event.reference_space_type()
                         );
 
-                        *reference_space.write() = xr_session
-                            .create_reference_space(
-                                xr::ReferenceSpaceType::STAGE,
-                                xr::Posef::IDENTITY,
-                            )
-                            .unwrap();
+                        reference_space = Arc::new(
+                            xr_session
+                                .create_reference_space(
+                                    xr::ReferenceSpaceType::STAGE,
+                                    xr::Posef::IDENTITY,
+                                )
+                                .unwrap(),
+                        );
+
+                        if let Some(sender) = &reference_space_sender {
+                            sender.send(Arc::clone(&reference_space)).ok();
+                        }
 
                         alvr_client_core::send_playspace(
                             xr_session
@@ -648,34 +679,85 @@ pub fn entry_point() {
                                 None
                             };
 
-                        let context = StreamingInputContext {
+                        let mut context = StreamingInputContext {
                             platform,
-                            is_streaming: Arc::clone(&is_streaming),
-                            frame_interval: Duration::from_secs_f32(1.0 / refresh_rate_hint),
                             xr_instance: xr_instance.clone(),
                             xr_session: xr_session.clone().into_any_graphics(),
                             hands_context: Arc::clone(&hands_context),
                             face_context,
+                            history_view_sender: history_view_sender.clone(),
                             reference_space: Arc::clone(&reference_space),
-                            views_history: Arc::clone(&views_history),
+                            last_ipd: 0.0,
+                            last_hand_positions: [Vec3::ZERO; 2],
                         };
 
+                        let is_streaming = Arc::clone(&is_streaming);
+
+                        let (sender, reference_space_receiver) = mpsc::channel();
+                        reference_space_sender = Some(sender);
+
                         streaming_input_thread = Some(thread::spawn(move || {
-                            let mut state = StreamingInputState::default();
-
                             let mut deadline = Instant::now();
-                            while context.is_streaming.value() {
-                                show_err(update_streaming_input(&context, &mut state));
+                            let frame_interval = Duration::from_secs_f32(1.0 / refresh_rate_hint);
 
-                                deadline += context.frame_interval / 3;
+                            while is_streaming.value() {
+                                update_streaming_input(&mut context);
+
+                                if let Ok(reference_space) = reference_space_receiver.try_recv() {
+                                    context.reference_space = reference_space;
+                                }
+
+                                deadline += frame_interval / 3;
                                 thread::sleep(deadline.saturating_duration_since(Instant::now()));
                             }
                         }));
 
+                        let foveation_profile = if let Some(config) =
+                            settings.video.clientside_foveation.into_option()
+                        {
+                            if exts.fb_swapchain_update_state
+                                && exts.fb_foveation
+                                && exts.fb_foveation_configuration
+                            {
+                                let level;
+                                let dynamic;
+                                match config.mode {
+                                    ClientsideFoveationMode::Static { level: lvl } => {
+                                        level = lvl;
+                                        dynamic = false;
+                                    }
+                                    ClientsideFoveationMode::Dynamic { max_level } => {
+                                        level = max_level;
+                                        dynamic = true;
+                                    }
+                                };
+
+                                xr_session
+                                    .create_foveation_profile(Some(xr::FoveationLevelProfile {
+                                        level: xr::FoveationLevelFB::from_raw(level as i32),
+                                        vertical_offset: config.vertical_offset_deg,
+                                        dynamic: xr::FoveationDynamicFB::from_raw(dynamic as i32),
+                                    }))
+                                    .ok()
+                            } else {
+                                None
+                            }
+                        } else {
+                            None
+                        };
+
                         let swapchains = stream_swapchains.get_or_insert_with(|| {
                             [
-                                create_swapchain(&xr_session, stream_view_resolution),
-                                create_swapchain(&xr_session, stream_view_resolution),
+                                create_swapchain(
+                                    &xr_session,
+                                    stream_view_resolution,
+                                    foveation_profile.as_ref(),
+                                ),
+                                create_swapchain(
+                                    &xr_session,
+                                    stream_view_resolution,
+                                    foveation_profile.as_ref(),
+                                ),
                             ]
                         });
 
@@ -780,8 +862,9 @@ pub fn entry_point() {
             swapchains[0].wait_image(xr::Duration::INFINITE).unwrap();
             swapchains[1].wait_image(xr::Duration::INFINITE).unwrap();
 
+            let mut views = last_good_views.clone();
+
             let display_time;
-            let views;
             let view_resolution;
             if is_streaming.value() {
                 let frame_poll_deadline = Instant::now()
@@ -802,28 +885,29 @@ pub fn entry_point() {
                     (vsync_time, ptr::null_mut())
                 };
 
-                let mut history_views = None;
-                for history_frame in &*views_history.lock() {
-                    if history_frame.timestamp == timestamp {
-                        history_views = Some(history_frame.views.clone());
+                while let Ok(views) = history_view_receiver.try_recv() {
+                    if views_history.len() > 360 {
+                        views_history.pop_front();
                     }
+
+                    views_history.push_back(views);
                 }
 
-                views = if let Some(views) = history_views {
-                    last_good_views = views.clone();
-                    views
-                } else {
-                    last_good_views.clone()
-                };
                 
                 // 渲染流
+
+                for history_frame in &views_history {
+                    if history_frame.timestamp == timestamp {
+                        views = history_frame.views.clone();
+                    }
+                }
                 alvr_client_core::opengl::render_stream(
                     hardware_buffer,
                     [left_swapchain_idx, right_swapchain_idx],
                 );
 
                 if !hardware_buffer.is_null() {
-                    if let Some(now) = xr_runtime_now(&xr_instance, platform) {
+                    if let Some(now) = xr_runtime_now(&xr_instance) {
                         alvr_client_core::report_submit(timestamp, vsync_time.saturating_sub(now));
                     }
                 }
@@ -834,14 +918,17 @@ pub fn entry_point() {
             } else {
                 display_time = vsync_time;
 
-                views = xr_session
+                let (flags, maybe_views) = xr_session
                     .locate_views(
                         xr::ViewConfigurationType::PRIMARY_STEREO,
                         frame_state.predicted_display_time,
-                        &reference_space.read(),
+                        &reference_space,
                     )
-                    .unwrap()
-                    .1;
+                    .unwrap();
+
+                if flags.contains(xr::ViewStateFlags::ORIENTATION_VALID) {
+                    views = maybe_views;
+                }
 
                 view_resolution = recommended_view_resolution;
 
@@ -869,34 +956,48 @@ pub fn entry_point() {
                     height: view_resolution.y as _,
                 },
             };
-            xr_frame_stream
-                .end(
-                    to_xr_time(display_time),
-                    xr::EnvironmentBlendMode::OPAQUE,
-                    &[&xr::CompositionLayerProjection::new()
-                        .space(&reference_space.read())
-                        .views(&[
-                            xr::CompositionLayerProjectionView::new()
-                                .pose(views[0].pose)
-                                .fov(views[0].fov)
-                                .sub_image(
-                                    xr::SwapchainSubImage::new()
-                                        .swapchain(&swapchains[0])
-                                        .image_array_index(0)
-                                        .image_rect(rect),
-                                ),
-                            xr::CompositionLayerProjectionView::new()
-                                .pose(views[1].pose)
-                                .fov(views[1].fov)
-                                .sub_image(
-                                    xr::SwapchainSubImage::new()
-                                        .swapchain(&swapchains[1])
-                                        .image_array_index(0)
-                                        .image_rect(rect),
-                                ),
-                        ])],
-                )
-                .unwrap();
+
+            let res = xr_frame_stream.end(
+                to_xr_time(display_time),
+                xr::EnvironmentBlendMode::OPAQUE,
+                &[&xr::CompositionLayerProjection::new()
+                    .space(&reference_space)
+                    .views(&[
+                        xr::CompositionLayerProjectionView::new()
+                            .pose(views[0].pose)
+                            .fov(views[0].fov)
+                            .sub_image(
+                                xr::SwapchainSubImage::new()
+                                    .swapchain(&swapchains[0])
+                                    .image_array_index(0)
+                                    .image_rect(rect),
+                            ),
+                        xr::CompositionLayerProjectionView::new()
+                            .pose(views[1].pose)
+                            .fov(views[1].fov)
+                            .sub_image(
+                                xr::SwapchainSubImage::new()
+                                    .swapchain(&swapchains[1])
+                                    .image_array_index(0)
+                                    .image_rect(rect),
+                            ),
+                    ])],
+            );
+
+            if let Err(e) = res {
+                let time = to_xr_time(display_time);
+                error!("End frame failed! {e}, timestamp: {display_time:?}, time: {time:?}");
+
+                xr_frame_stream
+                    .end(
+                        frame_state.predicted_display_time,
+                        xr::EnvironmentBlendMode::OPAQUE,
+                        &[],
+                    )
+                    .unwrap();
+            }
+
+            last_good_views = views.clone();
         }
     }
 
@@ -906,22 +1007,8 @@ pub fn entry_point() {
 }
 
 #[allow(unused)]
-fn xr_runtime_now(xr_instance: &xr::Instance, platform: Platform) -> Option<Duration> {
-    let time_nanos = {
-        #[cfg(target_os = "android")]
-        if platform == Platform::Pico {
-            let mut ts_now = libc::timespec {
-                tv_sec: 0,
-                tv_nsec: 0,
-            };
-            unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut ts_now) };
-            ts_now.tv_sec * 1_000_000_000 + ts_now.tv_nsec
-        } else {
-            xr_instance.now().ok()?.as_nanos()
-        }
-        #[cfg(not(target_os = "android"))]
-        xr_instance.now().ok()?.as_nanos()
-    };
+fn xr_runtime_now(xr_instance: &xr::Instance) -> Option<Duration> {
+    let time_nanos = xr_instance.now().ok()?.as_nanos();
 
     (time_nanos > 0).then(|| Duration::from_nanos(time_nanos as _))
 }

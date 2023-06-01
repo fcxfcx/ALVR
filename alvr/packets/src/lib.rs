@@ -1,8 +1,7 @@
 use alvr_common::{
     glam::{UVec2, Vec2},
-    DeviceMotion, Fov, LogSeverity, Pose,
+    DeviceMotion, Fov, LogEntry, LogSeverity, Pose,
 };
-use alvr_events::{ButtonValue, LogEvent};
 use alvr_session::{CodecType, SessionDesc};
 use serde::{Deserialize, Serialize};
 use std::{
@@ -29,6 +28,7 @@ pub struct VideoStreamingCapabilities {
 pub enum ClientConnectionResult {
     // 客户端连接的结果，分为接受和待机
     ConnectionAccepted {
+        client_protocol_id: u64,
         display_name: String,
         server_ip: IpAddr,
         streaming_capabilities: Option<VideoStreamingCapabilities>,
@@ -39,10 +39,9 @@ pub enum ClientConnectionResult {
 #[derive(Serialize, Deserialize)]
 pub struct StreamConfigPacket {
     // 数据流配置包，包括会话描述，分辨率，帧率，采样率
-    pub session_desc: String, // transfer session as string to allow for extrapolation
-    pub view_resolution: UVec2,
-    pub fps: f32,
-    pub game_audio_sample_rate: u32,
+    pub session: String, // JSON session that allows for extrapolation
+    pub negotiated: String, // JSON dictionary containing negotiated configuration. Can be extended
+                         // without a breaking protocol change, but entries can't be removed.
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -77,6 +76,18 @@ pub struct BatteryPacket {
     pub is_plugged: bool, // 是否充电
 }
 
+#[derive(Serialize, Deserialize, Clone, Copy, Debug)]
+pub enum ButtonValue {
+    Binary(bool),
+    Scalar(f32),
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct ButtonEntry {
+    pub path_id: u64,
+    pub value: ButtonValue,
+}
+
 #[derive(Serialize, Deserialize)]
 pub enum ClientControlPacket {
     // 客户端控制包，包括一些包类型
@@ -87,7 +98,7 @@ pub enum ClientControlPacket {
     ViewsConfig(ViewsConfig),
     Battery(BatteryPacket),
     VideoErrorReport, // legacy
-    Button { path_id: u64, value: ButtonValue },
+    Buttons(Vec<ButtonEntry>),
     ActiveInteractionProfile { device_id: u64, profile_id: u64 },
     Log { level: LogSeverity, message: String },
     Reserved(String),
@@ -125,7 +136,7 @@ pub struct Haptics {
     pub amplitude: f32,     // 触觉信息--振幅
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct AudioDevicesList {
     pub output: Vec<String>,
     pub input: Vec<String>,
@@ -216,8 +227,7 @@ pub enum FirewallRulesAction {
 
 #[derive(Serialize, Deserialize, Debug)]
 pub enum ServerRequest {
-    Ping,
-    Log(LogEvent),
+    Log(LogEntry),
     GetSession,
     UpdateSession(Box<SessionDesc>),
     SetValues(Vec<PathValuePair>),
@@ -236,10 +246,4 @@ pub enum ServerRequest {
     GetDriverList,
     RestartSteamvr,
     ShutdownSteamvr,
-}
-
-#[derive(Serialize, Deserialize, Debug)]
-pub enum ServerResponse {
-    AudioDevices(AudioDevicesList),
-    DriversList(Vec<PathBuf>),
 }
