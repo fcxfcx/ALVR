@@ -918,9 +918,9 @@ async fn connection_pipeline(
             .subscribe_to_stream::<ClientStatistics>(STATISTICS)
             .await?;
         async move {
+            let mut last_report_instant = Instant::now();
             loop {
                 let client_stats = receiver.recv_header_only().await?;
-                let mut last_report_instant = Instant::now();
                 if let Some(stats) = &mut *STATISTICS_MANAGER.lock() {
                     let timestamp = client_stats.target_timestamp;
                     let decoder_latency = client_stats.video_decode;
