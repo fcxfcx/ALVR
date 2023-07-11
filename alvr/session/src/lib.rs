@@ -95,18 +95,29 @@ pub struct OpenvrConfig {
     pub rc_average_bitrate: i64,
     pub nvenc_enable_weighted_prediction: bool,
     pub capture_frame_dir: String,
+    pub amd_bitrate_corruption_fix: bool,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub enum ConnectionState {
+    Disconnected,
+    Connecting,
+    Connected,
+    Streaming,
+    Disconnecting { should_be_removed: bool },
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
-pub struct ClientConnectionDesc {
+pub struct ClientConnectionConfig {
     pub display_name: String,        // 用户连接描述 -- 客户端名称
     pub current_ip: Option<IpAddr>,  // 用户连接描述 -- 客户端IP
     pub manual_ips: HashSet<IpAddr>, // 用户连接描述 -- 手动输入的用户列表
     pub trusted: bool,               // 用户连接描述 -- 是否信任
+    pub connection_state: ConnectionState,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
-pub struct SessionDesc {
+pub struct SessionConfig {
     pub server_version: Version,               // 连接会话描述 -- 服务器版本
     pub drivers_backup: Option<DriversBackup>, // 连接会话描述 -- 是否显示安装向导
     pub openvr_config: OpenvrConfig,           // 连接会话描述 -- OpenVR配置
@@ -115,7 +126,7 @@ pub struct SessionDesc {
     pub session_settings: SessionSettings, // 连接会话描述 -- 会话设置(在setting)
 }
 
-impl Default for SessionDesc {
+impl Default for SessionConfig {
     fn default() -> Self {
         Self {
             // 默认构建一个会话描述。。。
@@ -143,11 +154,11 @@ impl Default for SessionDesc {
     }
 }
 
-impl SessionDesc {
-    // If json_value is not a valid representation of SessionDesc (because of version upgrade), use
-    // some fuzzy logic to extrapolate as much information as possible.
-    // Since SessionDesc cannot have a schema (because SessionSettings would need to also have a
-    // schema, but it is generated out of our control), I only do basic name checking on fields and
+impl SessionConfig {
+    // If json_value is not a valid representation of SessionConfig (because of version upgrade),
+    // use some fuzzy logic to extrapolate as much information as possible.
+    // Since SessionConfig cannot have a schema (because SessionSettings would need to also have a
+    // schema, but it is generated out of our control), we only do basic name checking on fields and
     // deserialization will fail if the type of values does not match. Because of this,
     // `session_settings` must be handled separately to do a better job of retrieving data using the
     // settings schema.
@@ -195,7 +206,7 @@ impl SessionDesc {
             .collect();
         // Failure to extrapolate other session_desc fields is not notified.
         let mut session_desc_mut =
-            json::from_value::<SessionDesc>(json::Value::Object(new_fields)).unwrap_or_default();
+            json::from_value::<SessionConfig>(json::Value::Object(new_fields)).unwrap_or_default();
 
         match json::from_value::<SessionSettings>(maybe_session_settings_json.ok_or_else(enone!())?)
         {
@@ -567,13 +578,13 @@ mod tests {
 
     #[test]
     fn test_session_to_settings() {
-        let _settings = SessionDesc::default().to_settings();
+        let _settings = SessionConfig::default().to_settings();
     }
 
     #[test]
     fn test_session_extrapolation_trivial() {
-        SessionDesc::default()
-            .merge_from_json(&json::to_value(SessionDesc::default()).unwrap())
+        SessionConfig::default()
+            .merge_from_json(&json::to_value(SessionConfig::default()).unwrap())
             .unwrap();
     }
 
@@ -593,7 +604,7 @@ mod tests {
             }
           }"#;
 
-        SessionDesc::default()
+        SessionConfig::default()
             .merge_from_json(&json::from_str(input_json_string).unwrap())
             .unwrap();
     }

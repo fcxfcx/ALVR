@@ -1,10 +1,8 @@
 use super::{NestingInfo, SettingControl, INDENTATION_STEP};
-use crate::{
-    dashboard::DisplayString,
-    theme::{
-        log_colors::{INFO_LIGHT, WARNING_LIGHT},
-        OK_GREEN,
-    },
+use crate::dashboard::DisplayString;
+use alvr_gui_common::theme::{
+    log_colors::{INFO_LIGHT, WARNING_LIGHT},
+    OK_GREEN,
 };
 use alvr_packets::PathValuePair;
 use alvr_session::settings_schema::{SchemaEntry, SchemaNode};
@@ -91,7 +89,11 @@ impl Control {
         for (i, entry) in self.entries.iter_mut().enumerate() {
             ui.horizontal(|ui| {
                 ui.add_space(INDENTATION_STEP * self.nesting_info.indentation_level as f32);
-                ui.label(&entry.id.display);
+                let label_res = ui.label(&entry.id.display);
+                if cfg!(debug_assertions) {
+                    label_res.on_hover_text(&*entry.id);
+                }
+
                 if let Some(string) = &entry.help {
                     if ui.colored_label(INFO_LIGHT, "❓").hovered() {
                         popup::show_tooltip_text(ui.ctx(), egui::Id::new(POPUP_ID), string);
@@ -101,12 +103,15 @@ impl Control {
                     popup::show_tooltip_text(
                         ui.ctx(),
                         egui::Id::new(POPUP_ID),
-                        "Changing this setting will make SteamVR restart!\nPlease save your in-game progress first",
+                        format!(
+                            "Changing this setting will make SteamVR restart!\n{}",
+                            "Please save your in-game progress first"
+                        ),
                     );
                 }
 
                 // The emoji is blue but it will be green in the UI
-                if entry.real_time_flag && ui.colored_label(OK_GREEN, "🔵").hovered() { 
+                if entry.real_time_flag && ui.colored_label(OK_GREEN, "🔵").hovered() {
                     popup::show_tooltip_text(
                         ui.ctx(),
                         egui::Id::new(POPUP_ID),

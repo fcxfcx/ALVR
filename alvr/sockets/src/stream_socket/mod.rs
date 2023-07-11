@@ -443,30 +443,30 @@ pub struct StreamSocket {
 }
 
 impl StreamSocket {
-    pub async fn request_stream<T>(&self, stream_id: u16) -> StrResult<StreamSender<T>> {
+    pub fn request_stream<T>(&self, stream_id: u16) -> StreamSender<T> {
         // 构建一个StreamSender对象
-        Ok(StreamSender {
+        StreamSender {
             stream_id,
             max_packet_size: self.max_packet_size,
             socket: self.send_socket.clone(),
             header_buffer: vec![],
             next_packet_index: 0, //把包索引先设为0
             _phantom: PhantomData,
-        })
+        }
     }
 
-    pub async fn subscribe_to_stream<T>(&self, stream_id: u16) -> StrResult<StreamReceiver<T>> {
+    pub async fn subscribe_to_stream<T>(&self, stream_id: u16) -> StreamReceiver<T> {
         let (sender, receiver) = mpsc::unbounded_channel();
         self.packet_queues.lock().await.insert(stream_id, sender); // 把流id和负责这个流的sender储存到哈希表里
 
         // 返回一个StreamReceiver对象，把receiver传给它，这个receiver对应的是无界消息传递通道的接收端
-        Ok(StreamReceiver {
+        StreamReceiver {
             receiver,
             next_packet_shards: HashMap::new(),
             next_packet_shards_count: None,
             next_packet_index: 0,
             _phantom: PhantomData,
-        })
+        }
     }
 
     pub async fn receive_loop(&self) -> StrResult {

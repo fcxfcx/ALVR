@@ -6,35 +6,36 @@ use crate::{
     sockets::AnnouncerSocket,
     statistics::StatisticsManager,
     storage::Config,
-    ClientCoreEvent, CONTROL_CHANNEL_SENDER, DISCONNECT_NOTIFIER, EVENT_QUEUE, IS_ALIVE,
-    IS_RESUMED, IS_STREAMING, STATISTICS_MANAGER, STATISTICS_SENDER, TRACKING_SENDER,
+    ClientCoreEvent, EVENT_QUEUE, IS_ALIVE, IS_RESUMED, IS_STREAMING, STATISTICS_MANAGER,
 };
 use alvr_audio::AudioDevice;
-use alvr_common::{glam::UVec2, prelude::*, ALVR_VERSION, HEAD_ID};
-use alvr_packets::{
-    BatteryPacket, ClientConnectionResult, ClientControlPacket, Haptics, ServerControlPacket,
-    StreamConfigPacket, VideoPacketHeader, VideoStreamingCapabilities, AUDIO, HAPTICS, STATISTICS,
-    TRACKING, VIDEO,
+use alvr_common::{
+    glam::UVec2,
+    once_cell::sync::Lazy,
+    parking_lot::{Mutex, RwLock},
+    prelude::*,
+    ALVR_VERSION,
 };
-use alvr_session::{settings_schema::Switch, SessionDesc};
+use alvr_packets::{
+    ClientConnectionResult, ClientControlPacket, ClientStatistics, Haptics, ServerControlPacket,
+    StreamConfigPacket, Tracking, VideoPacketHeader, VideoStreamingCapabilities, AUDIO, HAPTICS,
+    STATISTICS, TRACKING, VIDEO,
+};
+use alvr_session::{settings_schema::Switch, SessionConfig};
 use alvr_sockets::{
-    spawn_cancelable, PeerType, ProtoControlSocket, ReceiverBuffer, StreamSocketBuilder,
+    spawn_cancelable, PeerType, ProtoControlSocket, ReceiverBuffer, StreamSender,
+    StreamSocketBuilder,
 };
 use futures::future::BoxFuture;
 use serde_json as json;
 use std::{
     collections::HashMap,
     future,
-    net::IpAddr,
-    sync::Arc,
+    sync::{mpsc, Arc},
     thread,
     time::{Duration, Instant},
 };
-use tokio::{
-    runtime::Runtime,
-    sync::{mpsc as tmpsc, Mutex},
-    time,
-};
+use tokio::{runtime::Runtime, sync::Notify, time};
 
 #[cfg(target_os = "android")]
 use crate::audio;
@@ -61,7 +62,19 @@ const DISCOVERY_RETRY_PAUSE: Duration = Duration::from_millis(500);
 const RETRY_CONNECT_MIN_INTERVAL: Duration = Duration::from_secs(1);
 const NETWORK_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(1);
 const CONNECTION_RETRY_INTERVAL: Duration = Duration::from_secs(1);
-const BATTERY_POLL_INTERVAL: Duration = Duration::from_secs(60);
+
+static DISCONNECT_SERVER_NOTIFIER: Lazy<Notify> = Lazy::new(Notify::new);
+
+pub static CONNECTION_RUNTIME: Lazy<RwLock<Option<Runtime>>> = Lazy::new(|| RwLock::new(None));
+pub static TRACKING_SENDER: Lazy<Mutex<Option<StreamSender<Tracking>>>> =
+    Lazy::new(|| Mutex::new(None));
+pub static STATISTICS_SENDER: Lazy<Mutex<Option<StreamSender<ClientStatistics>>>> =
+    Lazy::new(|| Mutex::new(None));
+
+// Note: the ControlSocketSender cannot be shared directly. this is because it is used inside the
+// logging callback and that could lead to double lock.
+pub static CONTROL_CHANNEL_SENDER: Lazy<Mutex<Option<mpsc::Sender<ClientControlPacket>>>> =
+    Lazy::new(|| Mutex::new(None));
 
 // 记录hud信息
 fn set_hud_message(message: &str) {
@@ -84,18 +97,14 @@ pub fn connection_lifecycle_loop(
     // 设置初始化hud信息
     set_hud_message(INITIAL_MESSAGE);
 
-    let decoder_guard = Arc::new(Mutex::new(()));
-
     loop {
         // 如果IS_ALIVE.value()为false则中断
         check_interrupt!(IS_ALIVE.value());
 
         if IS_RESUMED.value() {
-            if let Err(e) = connection_pipeline(
-                recommended_view_resolution,
-                supported_refresh_rates.clone(),
-                Arc::clone(&decoder_guard),
-            ) {
+            if let Err(e) =
+                connection_pipeline(recommended_view_resolution, supported_refresh_rates.clone())
+            {
                 match e {
                     InterruptibleError::Interrupted => return Ok(()),
                     InterruptibleError::Other(_) => {
@@ -106,6 +115,8 @@ pub fn connection_lifecycle_loop(
                     }
                 }
             }
+        } else {
+            debug!("Skip try connection because the device is sleeping");
         }
 
         thread::sleep(CONNECTION_RETRY_INTERVAL);
@@ -115,7 +126,6 @@ pub fn connection_lifecycle_loop(
 fn connection_pipeline(
     recommended_view_resolution: UVec2,
     supported_refresh_rates: Vec<f32>,
-    decoder_guard: Arc<Mutex<()>>,
 ) -> IntResult {
     let runtime = Runtime::new().map_err(to_int_e!())?;
 
@@ -183,39 +193,27 @@ fn connection_pipeline(
         )
         .map_err(to_int_e!())?;
 
-    // 阻塞读得到系统流配置包
-    let config_packet = runtime
-        .block_on(proto_control_socket.recv::<StreamConfigPacket>())
-        .map_err(to_int_e!())?;
+    let config_packet = runtime.block_on(async {
+        tokio::select! {
+            res = proto_control_socket.recv::<StreamConfigPacket>() => res.map_err(to_int_e!()),
+            _ = time::sleep(Duration::from_secs(1)) => int_fmt_e!("Timeout waiting for stream config"),
+        }
+    })?;
 
-    runtime
-        .block_on(stream_pipeline(
-            proto_control_socket,
-            config_packet,
-            server_ip,
-            decoder_guard,
-        ))
-        .map_err(to_int_e!())
-}
 
-async fn stream_pipeline(
-    proto_socket: ProtoControlSocket,
-    stream_config: StreamConfigPacket,
-    server_ip: IpAddr,
-    decoder_guard: Arc<Mutex<()>>,
-) -> StrResult {
-    // settings对象里保存了之前server发过来的流配置信息
     let settings = {
-        let mut session_desc = SessionDesc::default();
-        session_desc.merge_from_json(&json::from_str(&stream_config.session).map_err(err!())?)?;
+        let mut session_desc = SessionConfig::default();
+        session_desc
+            .merge_from_json(&json::from_str(&config_packet.session).map_err(to_int_e!())?)
+            .map_err(to_int_e!())?;
         session_desc.to_settings()
     };
 
 
     // 流开始事件保存了一些信息
     let negotiated_config =
-        json::from_str::<HashMap<String, json::Value>>(&stream_config.negotiated)
-            .map_err(err!())?;
+        json::from_str::<HashMap<String, json::Value>>(&config_packet.negotiated)
+            .map_err(to_int_e!())?;
 
     let view_resolution = negotiated_config
         .get("view_resolution")
@@ -235,12 +233,26 @@ async fn stream_pipeline(
         settings: Box::new(settings.clone()),
     };
 
-    let (control_sender, mut control_receiver) = proto_socket.split();
-    let control_sender = Arc::new(Mutex::new(control_sender));
+    *STATISTICS_MANAGER.lock() = Some(StatisticsManager::new(
+        settings.connection.statistics_history_size,
+        Duration::from_secs_f32(1.0 / refresh_rate_hint),
+        if let Switch::Enabled(config) = settings.headset.controllers {
+            config.steamvr_pipeline_frames
+        } else {
+            0.0
+        },
+    ));
 
-    // 阻塞读
-    match control_receiver.recv().await {
-        // 开始流
+
+    let (mut control_sender, mut control_receiver) = proto_control_socket.split();
+
+    match runtime.block_on(async {
+        tokio::select! {
+            res = control_receiver.recv() => res,
+            _ = time::sleep(Duration::from_secs(1)) => fmt_e!("Timeout"),
+        }
+    }) {
+
         Ok(ServerControlPacket::StartStream) => {
             info!("Stream starting");
             set_hud_message(STREAM_STARTING_MESSAGE);
@@ -265,58 +277,44 @@ async fn stream_pipeline(
         }
     }
 
-    *STATISTICS_MANAGER.lock() = Some(StatisticsManager::new(
-        settings.connection.statistics_history_size as _,
-        Duration::from_secs_f32(1.0 / refresh_rate_hint),
-        if let Switch::Enabled(config) = settings.headset.controllers {
-            config.steamvr_pipeline_frames
-        } else {
-            0.0
-        },
-    ));
+// StreamSocketBuilder对象里面包含流端口号、协议是TCP/UDP、发送接收的buf字节数
+    let listen_for_server_future = StreamSocketBuilder::listen_for_server(
 
-    // StreamSocketBuilder对象里面包含流端口号、协议是TCP/UDP、发送接收的buf字节数
-    let stream_socket_builder = StreamSocketBuilder::listen_for_server(
         settings.connection.stream_port,
         settings.connection.stream_protocol,
         settings.connection.client_send_buffer_bytes,
         settings.connection.client_recv_buffer_bytes,
-    )
-    .await?;
+    );
+    let stream_socket_builder = runtime.block_on(async {
+        tokio::select! {
+            res = listen_for_server_future => res.map_err(to_int_e!()),
+            _ = time::sleep(Duration::from_secs(1)) => int_fmt_e!("Timeout while binding stream socket"),
+        }
+    })?;
 
-    // 通过TCP控制连接发送StreamReady消息
-    if let Err(e) = control_sender
-        .lock()
-        .await
-        .send(&ClientControlPacket::StreamReady)
-        .await
-    {
+
+    if let Err(e) = runtime.block_on(control_sender.send(&ClientControlPacket::StreamReady)) {
         info!("Server disconnected. Cause: {e}");
         set_hud_message(SERVER_DISCONNECTED_MESSAGE);
         return Ok(());
     }
 
+
+    let accept_from_server_future = stream_socket_builder.accept_from_server(
+        server_ip,
+        settings.connection.stream_port,
+        settings.connection.packet_size as _,
+    );
     // 主动和server建立流连接，返回stream_socket
-    let stream_socket = tokio::select! {
-        res = stream_socket_builder.accept_from_server(
-            server_ip,
-            settings.connection.stream_port,
-            settings.connection.packet_size as _
-        ) => res?,
-        _ = time::sleep(Duration::from_secs(5)) => {
-            return fmt_e!("Timeout while setting up streams");
+    let stream_socket = runtime.block_on(async {
+        tokio::select! {
+            res = accept_from_server_future => res.map_err(to_int_e!()),
+            _ = time::sleep(Duration::from_secs(2)) => int_fmt_e!("Timeout while setting up streams")
         }
-    };
+    })?;
     let stream_socket = Arc::new(stream_socket);
 
     info!("Connected to server");
-
-    // create this before initializing the stream on cpp side
-    // control_channel_sender和control_channel_receiver用来在异步任务间通信
-    let (control_channel_sender, mut control_channel_receiver) = tmpsc::unbounded_channel();
-    *CONTROL_CHANNEL_SENDER.lock() = Some(control_channel_sender);
-
-    // 初始化编码器配置
     {
         let config = &mut *DECODER_INIT_CONFIG.lock();
 
@@ -325,147 +323,20 @@ async fn stream_pipeline(
         config.options = settings.video.mediacodec_extra_options;
     }
 
-    // 循环阻塞读data_receiver，收到hmd的tracking追踪信息后直接通过socket_sender转发给server
-    let tracking_send_loop = {
-        // 通过stream_socket获得socket_sender对象
-        let mut socket_sender = stream_socket.request_stream(TRACKING).await?;
-        async move {
-            let (data_sender, mut data_receiver) = tmpsc::unbounded_channel();
-            *TRACKING_SENDER.lock() = Some(data_sender);
 
-            while let Some(tracking) = data_receiver.recv().await {
-                socket_sender.send(&tracking, vec![]).await.ok();
+    let tracking_sender = stream_socket.request_stream(TRACKING);
+    let statistics_sender = stream_socket.request_stream(STATISTICS);
+    let mut video_receiver =
+        runtime.block_on(stream_socket.subscribe_to_stream::<VideoPacketHeader>(VIDEO));
+    let mut haptics_receiver =
+        runtime.block_on(stream_socket.subscribe_to_stream::<Haptics>(HAPTICS));
 
-                // Note: this is not the best place to report the acquired input. Instead it should
-                // be done as soon as possible (or even just before polling the input). Instead this
-                // is reported late to partially compensate for lack of network latency measurement,
-                // so the server can just use total_pipeline_latency as the postTimeoffset.
-                // This hack will be removed once poseTimeOffset can be calculated more accurately.
-                if let Some(stats) = &mut *STATISTICS_MANAGER.lock() {
-                    stats.report_input_acquired(tracking.target_timestamp);
-                }
-            }
-
-            Ok(())
-        }
-    };
-
-    // 循环阻塞读data_receiver，收到hmd的Statistics统计信息后直接通过socket_sender转发给server
-    let statistics_send_loop = {
-        let mut socket_sender = stream_socket.request_stream(STATISTICS).await?;
-        async move {
-            let (data_sender, mut data_receiver) = tmpsc::unbounded_channel();
-            *STATISTICS_SENDER.lock() = Some(data_sender);
-
-            while let Some(stats) = data_receiver.recv().await {
-                socket_sender.send(&stats, vec![]).await.ok();
-            }
-
-            Ok(())
-        }
-    };
-
-    IS_STREAMING.set(true);
-
-    // 接收视频流的loop
-    let video_receive_loop = {
-        let mut receiver = stream_socket
-            .subscribe_to_stream::<VideoPacketHeader>(VIDEO)
-            .await?;
-        async move {
-            let _decoder_guard = decoder_guard.lock().await;
-
-            // close stream on Drop (manual disconnection or execution canceling)
-            struct StreamCloseGuard;
-
-            impl Drop for StreamCloseGuard {
-                fn drop(&mut self) {
-                    EVENT_QUEUE
-                        .lock()
-                        .push_back(ClientCoreEvent::StreamingStopped);
-
-                    IS_STREAMING.set(false);
-
-                    #[cfg(target_os = "android")]
-                    {
-                        *crate::decoder::DECODER_ENQUEUER.lock() = None;
-                        *crate::decoder::DECODER_DEQUEUER.lock() = None;
-                    }
-                }
-            }
-
-            let _stream_guard = StreamCloseGuard;
-
-            EVENT_QUEUE.lock().push_back(streaming_start_event);
-
-            // 接收的缓冲区
-            let mut receiver_buffer = ReceiverBuffer::new();
-
-            let mut stream_corrupted = false;
-
-            loop {
-                // 从receiver缓冲区中获取信息
-                receiver.recv_buffer(&mut receiver_buffer).await?;
-                let (header, nal) = receiver_buffer.get()?;
-
-                if !IS_RESUMED.value() {
-                    break Ok(());
-                }
-
-                if let Some(stats) = &mut *STATISTICS_MANAGER.lock() {
-                    stats.report_video_packet_received(header.timestamp);
-                }
-
-                // 丢包监测
-                if header.is_idr {
-                    stream_corrupted = false;
-                } else if receiver_buffer.had_packet_loss() {
-                    stream_corrupted = true;
-                    if let Some(sender) = &*CONTROL_CHANNEL_SENDER.lock() {
-                        sender.send(ClientControlPacket::RequestIdr).ok();
-                    }
-                    warn!("Network dropped video packet");
-                }
-
-                if !stream_corrupted || !settings.connection.avoid_video_glitching {
-                    if !decoder::push_nal(header.timestamp, nal) {
-                        stream_corrupted = true;
-                        if let Some(sender) = &*CONTROL_CHANNEL_SENDER.lock() {
-                            sender.send(ClientControlPacket::RequestIdr).ok();
-                        }
-                        warn!("Dropped video packet. Reason: Decoder saturation")
-                    }
-                } else {
-                    warn!("Dropped video packet. Reason: Waiting for IDR frame")
-                }
-            }
-        }
-    };
-
-    // 接收触觉流的loop
-    let haptics_receive_loop = {
-        let mut receiver = stream_socket
-            .subscribe_to_stream::<Haptics>(HAPTICS)
-            .await?;
-        async move {
-            loop {
-                let haptics = receiver.recv_header_only().await?;
-
-                EVENT_QUEUE.lock().push_back(ClientCoreEvent::Haptics {
-                    device_id: haptics.device_id,
-                    duration: haptics.duration,
-                    frequency: haptics.frequency,
-                    amplitude: haptics.amplitude,
-                });
-            }
-        }
-    };
 
     // 游戏声音loop
     let game_audio_loop: BoxFuture<_> = if let Switch::Enabled(config) = settings.audio.game_audio {
-        let device = AudioDevice::new_output(None, None).map_err(err!())?;
+        let device = AudioDevice::new_output(None, None).map_err(to_int_e!())?;
 
-        let game_audio_receiver = stream_socket.subscribe_to_stream(AUDIO).await?;
+        let game_audio_receiver = runtime.block_on(stream_socket.subscribe_to_stream(AUDIO));
         Box::pin(audio::play_audio_loop(
             device,
             2,
@@ -479,9 +350,9 @@ async fn stream_pipeline(
 
     // 麦克风loop
     let microphone_loop: BoxFuture<_> = if matches!(settings.audio.microphone, Switch::Enabled(_)) {
-        let device = AudioDevice::new_input(None).map_err(err!())?;
+        let device = AudioDevice::new_input(None).map_err(to_int_e!())?;
 
-        let microphone_sender = stream_socket.request_stream(AUDIO).await?;
+        let microphone_sender = stream_socket.request_stream(AUDIO);
         Box::pin(audio::record_audio_loop(
             device,
             1,
@@ -492,27 +363,117 @@ async fn stream_pipeline(
         Box::pin(future::pending())
     };
 
-    // 开启一个线程用来做事件轮询
+    // Important: To make sure this is successfully unset when stopping streaming, the rest of the
+    // function MUST be infallible
+    IS_STREAMING.set(true);
+    *CONNECTION_RUNTIME.write() = Some(runtime);
+    *TRACKING_SENDER.lock() = Some(tracking_sender);
+    *STATISTICS_SENDER.lock() = Some(statistics_sender);
+
+    let (control_channel_sender, control_channel_receiver) = mpsc::channel();
+    *CONTROL_CHANNEL_SENDER.lock() = Some(control_channel_sender);
+
+    EVENT_QUEUE.lock().push_back(streaming_start_event);
+
+    let video_receive_thread = thread::spawn(move || {
+        let mut receiver_buffer = ReceiverBuffer::new();
+        let mut stream_corrupted = false;
+        loop {
+            if let Some(runtime) = &*CONNECTION_RUNTIME.read() {
+                let res = runtime.block_on(async {
+                    tokio::select! {
+                        res = video_receiver.recv_buffer(&mut receiver_buffer) => Some(res),
+                        _ = time::sleep(Duration::from_millis(500)) => None,
+                    }
+                });
+
+                match res {
+                    Some(Ok(())) => (),
+                    Some(Err(_)) => return,
+                    None => continue,
+                }
+            } else {
+                return;
+            }
+
+            let Ok((header, nal)) = receiver_buffer.get() else {
+                return
+            };
+
+            if let Some(stats) = &mut *STATISTICS_MANAGER.lock() {
+                stats.report_video_packet_received(header.timestamp);
+            }
+
+            if header.is_idr {
+                stream_corrupted = false;
+            } else if receiver_buffer.had_packet_loss() {
+                stream_corrupted = true;
+                if let Some(sender) = &*CONTROL_CHANNEL_SENDER.lock() {
+                    sender.send(ClientControlPacket::RequestIdr).ok();
+                }
+                warn!("Network dropped video packet");
+            }
+
+            if !stream_corrupted || !settings.connection.avoid_video_glitching {
+                if !decoder::push_nal(header.timestamp, nal) {
+                    stream_corrupted = true;
+                    if let Some(sender) = &*CONTROL_CHANNEL_SENDER.lock() {
+                        sender.send(ClientControlPacket::RequestIdr).ok();
+                    }
+                    warn!("Dropped video packet. Reason: Decoder saturation")
+                }
+            } else {
+                warn!("Dropped video packet. Reason: Waiting for IDR frame")
+            }
+        }
+    });
+
+    let haptics_receive_thread = thread::spawn(move || loop {
+        let haptics = if let Some(runtime) = &*CONNECTION_RUNTIME.read() {
+            let res = runtime.block_on(async {
+                tokio::select! {
+                    res = haptics_receiver.recv_header_only() => Some(res),
+                    _ = time::sleep(Duration::from_millis(500)) => None,
+                }
+            });
+
+            match res {
+                Some(Ok(packet)) => packet,
+                Some(Err(_)) => return,
+                None => continue,
+            }
+        } else {
+            return;
+        };
+
+        EVENT_QUEUE.lock().push_back(ClientCoreEvent::Haptics {
+            device_id: haptics.device_id,
+            duration: haptics.duration,
+            frequency: haptics.frequency,
+            amplitude: haptics.amplitude,
+        });
+    });
+
     // Poll for events that need a constant thread (mainly for the JNI env)
+    #[cfg(target_os = "android")]
     thread::spawn(|| {
-        #[cfg(target_os = "android")]
-        let vm = platform::vm();
-        #[cfg(target_os = "android")]
-        let _env = vm.attach_current_thread();
+        const BATTERY_POLL_INTERVAL: Duration = Duration::from_secs(5);
 
         let mut previous_hmd_battery_status = (0.0, false);
         let mut battery_poll_deadline = Instant::now();
 
+        let battery_manager = platform::android::BatteryManager::new();
+
         while IS_STREAMING.value() {
             // 每60s执行一次，更新hmd的电池状态
             if battery_poll_deadline < Instant::now() {
-                let new_hmd_battery_status = platform::battery_status();
+                let new_hmd_battery_status = battery_manager.status();
 
                 if new_hmd_battery_status != previous_hmd_battery_status {
                     if let Some(sender) = &*CONTROL_CHANNEL_SENDER.lock() {
                         sender
-                            .send(ClientControlPacket::Battery(BatteryPacket {
-                                device_id: *HEAD_ID,
+                            .send(ClientControlPacket::Battery(crate::BatteryPacket {
+                                device_id: *alvr_common::HEAD_ID,
                                 gauge_value: new_hmd_battery_status.0,
                                 is_plugged: new_hmd_battery_status.1,
                             }))
@@ -525,89 +486,126 @@ async fn stream_pipeline(
                 battery_poll_deadline += BATTERY_POLL_INTERVAL;
             }
 
-            thread::sleep(Duration::from_secs(1));
+            thread::sleep(Duration::from_millis(500));
         }
     });
 
     // 每隔1s通过负责控制的TCP连接发送一条KeepAlive消息，如果Server断开则loop退出
-    let keepalive_sender_loop = {
-        let control_sender = Arc::clone(&control_sender);
-        async move {
-            loop {
-                let res = control_sender
-                    .lock()
-                    .await
-                    .send(&ClientControlPacket::KeepAlive)
-                    .await;
-                if let Err(e) = res {
+    let keepalive_sender_thread = thread::spawn(move || {
+        let mut deadline = Instant::now();
+        while IS_STREAMING.value() {
+            if let Some(sender) = &*CONTROL_CHANNEL_SENDER.lock() {
+                sender.send(ClientControlPacket::KeepAlive).ok();
+            }
+
+            deadline += NETWORK_KEEPALIVE_INTERVAL;
+            while Instant::now() < deadline && IS_STREAMING.value() {
+                thread::sleep(Duration::from_millis(500));
+            }
+        }
+    });
+
+    let control_send_thread = thread::spawn(move || {
+        while let Ok(packet) = control_channel_receiver.recv() {
+            if let Some(runtime) = &*CONNECTION_RUNTIME.read() {
+                if let Err(e) = runtime.block_on(control_sender.send(&packet)) {
                     info!("Server disconnected. Cause: {e}");
                     set_hud_message(SERVER_DISCONNECTED_MESSAGE);
-                    break Ok(());
-                }
+                    DISCONNECT_SERVER_NOTIFIER.notify_waiters();
 
-                time::sleep(NETWORK_KEEPALIVE_INTERVAL).await;
-            }
-        }
-    };
-
-    // 循环阻塞读control_channel_receiver的packet并通过负责控制的TCP连接发给server
-    let control_send_loop = async move {
-        while let Some(packet) = control_channel_receiver.recv().await {
-            control_sender.lock().await.send(&packet).await.ok();
-        }
-
-        Ok(())
-    };
-
-    // 循环阻塞读server发过来的消息并做处理
-    let control_receive_loop = async move {
-        loop {
-            match control_receiver.recv().await {
-                Ok(ServerControlPacket::InitializeDecoder(config)) => {
-                    decoder::create_decoder(config);
-                }
-                Ok(ServerControlPacket::Restarting) => {
-                    info!("{SERVER_RESTART_MESSAGE}");
-                    set_hud_message(SERVER_RESTART_MESSAGE);
-                    break Ok(());
-                }
-                Ok(_) => (),
-                Err(e) => {
-                    info!("{SERVER_DISCONNECTED_MESSAGE} Cause: {e}");
-                    set_hud_message(SERVER_DISCONNECTED_MESSAGE);
-                    break Ok(());
+                    return;
                 }
             }
         }
-    };
+    });
+
+    let control_receive_thread = thread::spawn(move || loop {
+        let maybe_packet = if let Some(runtime) = &*CONNECTION_RUNTIME.read() {
+            runtime.block_on(async {
+                tokio::select! {
+                    res = control_receiver.recv() => Some(res),
+                    _ = time::sleep(Duration::from_millis(500)) => None,
+                }
+            })
+        } else {
+            return;
+        };
+
+        match maybe_packet {
+            Some(Ok(ServerControlPacket::InitializeDecoder(config))) => {
+                decoder::create_decoder(config);
+            }
+            Some(Ok(ServerControlPacket::Restarting)) => {
+                info!("{SERVER_RESTART_MESSAGE}");
+                set_hud_message(SERVER_RESTART_MESSAGE);
+                DISCONNECT_SERVER_NOTIFIER.notify_waiters();
+
+                return;
+            }
+            Some(Ok(_)) => (),
+            Some(Err(e)) => {
+                info!("{SERVER_DISCONNECTED_MESSAGE} Cause: {e}");
+                set_hud_message(SERVER_DISCONNECTED_MESSAGE);
+                DISCONNECT_SERVER_NOTIFIER.notify_waiters();
+
+                return;
+            }
+            None => (),
+        }
+    });
 
     let receive_loop = async move { stream_socket.receive_loop().await };
 
-    // Run many tasks concurrently. Threading is managed by the runtime, for best performance.
-    // 所有loop的future异步执行，直到被取消
-    tokio::select! {
-        res = spawn_cancelable(receive_loop) => {
-            if let Err(e) = res {
-                info!("Server disconnected. Cause: {e}");
-            }
-            set_hud_message(
-                SERVER_DISCONNECTED_MESSAGE
-            );
+    let lifecycle_check_thread = thread::spawn(|| {
+        while IS_STREAMING.value() && IS_RESUMED.value() && IS_ALIVE.value() {
+            thread::sleep(Duration::from_millis(500));
+        }
 
-            Ok(())
-        },
-        res = spawn_cancelable(game_audio_loop) => res,
-        res = spawn_cancelable(microphone_loop) => res,
-        res = spawn_cancelable(tracking_send_loop) => res,
-        res = spawn_cancelable(statistics_send_loop) => res,
-        res = spawn_cancelable(video_receive_loop) => res,
-        res = spawn_cancelable(haptics_receive_loop) => res,
-        res = spawn_cancelable(control_send_loop) => res,
+        DISCONNECT_SERVER_NOTIFIER.notify_waiters();
+    });
 
-        // keep these loops on the current task
-        res = keepalive_sender_loop => res,
-        res = control_receive_loop => res,
+    let res = CONNECTION_RUNTIME.read().as_ref().unwrap().block_on(async {
+        // Run many tasks concurrently. Threading is managed by the runtime, for best performance.
+        tokio::select! {
+            res = spawn_cancelable(receive_loop) => {
+                if let Err(e) = res {
+                    info!("Server disconnected. Cause: {e}");
+                }
+                set_hud_message(
+                    SERVER_DISCONNECTED_MESSAGE
+                );
 
-        _ = DISCONNECT_NOTIFIER.notified() => Ok(()),
+                Ok(())
+            },
+            res = spawn_cancelable(game_audio_loop) => res,
+            res = spawn_cancelable(microphone_loop) => res,
+
+            _ = DISCONNECT_SERVER_NOTIFIER.notified() => Ok(()),
+        }
+    });
+
+    IS_STREAMING.set(false);
+    *CONNECTION_RUNTIME.write() = None;
+    *TRACKING_SENDER.lock() = None;
+    *STATISTICS_SENDER.lock() = None;
+    *CONTROL_CHANNEL_SENDER.lock() = None;
+
+    EVENT_QUEUE
+        .lock()
+        .push_back(ClientCoreEvent::StreamingStopped);
+
+    #[cfg(target_os = "android")]
+    {
+        *crate::decoder::DECODER_ENQUEUER.lock() = None;
+        *crate::decoder::DECODER_DEQUEUER.lock() = None;
     }
+
+    video_receive_thread.join().ok();
+    haptics_receive_thread.join().ok();
+    control_receive_thread.join().ok();
+    control_send_thread.join().ok();
+    keepalive_sender_thread.join().ok();
+    lifecycle_check_thread.join().ok();
+
+    res.map_err(to_int_e!())
 }

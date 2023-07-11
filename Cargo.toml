@@ -3,7 +3,7 @@ resolver = "2"
 members = ["alvr/*"]
 
 [workspace.package]
-version = "20.0.0-dev15"
+version = "21.0.0-dev00"
 edition = "2021"
 rust-version = "1.65"
 authors = ["alvr-org"]
@@ -19,6 +19,7 @@ alvr_packets = { path = "alvr/packets" }
 alvr_server_io = { path = "alvr/server_io" }
 alvr_session = { path = "alvr/session" }
 alvr_sockets = { path = "alvr/sockets" }
+alvr_gui_common = { path = "alvr/gui_common" }
 
 [profile.distribution]
 inherits = "release"

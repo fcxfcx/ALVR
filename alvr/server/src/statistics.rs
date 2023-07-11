@@ -1,5 +1,5 @@
-use alvr_common::{SlidingWindowAverage, HEAD_ID, LEFT_HAND_ID, RIGHT_HAND_ID};
-use alvr_events::{EventType, GraphStatistics, Statistics};
+use alvr_common::{SlidingWindowAverage, HEAD_ID};
+use alvr_events::{EventType, GraphStatistics, NominalBitrateStats, StatisticsSummary};
 use alvr_packets::ClientStatistics;
 use std::{
     collections::{HashMap, VecDeque},
@@ -15,7 +15,7 @@ pub struct HistoryFrame {
     frame_present: Instant,           //帧呈现时间
     frame_composed: Instant,          //帧组成时间
     frame_encoded: Instant,           //帧编码时间
-    total_pipeline_latency: Duration, //总流程延迟时间
+    video_packet_bytes: usize,
 }
 
 impl Default for HistoryFrame {
@@ -28,9 +28,15 @@ impl Default for HistoryFrame {
             frame_present: now,                     // 帧呈现时间，初始化为当前时间
             frame_composed: now,                    // 帧合成时间，初始化为当前时间
             frame_encoded: now,                     // 帧编码时间，初始化为当前时间
-            total_pipeline_latency: Duration::ZERO, // 总延迟，初始化为 0
+            video_packet_bytes: 0,
         }
     }
+}
+
+#[derive(Default, Clone)]
+struct BatteryData {
+    gauge_value: f32,
+    is_plugged: bool,
 }
 
 pub struct StatisticsManager {
@@ -45,11 +51,12 @@ pub struct StatisticsManager {
     video_bytes_partial_sum: usize,         //视频数据部分字节求和
     packets_lost_total: usize,              //丢包总数
     packets_lost_partial_sum: usize,        //丢包部分求和
-    battery_gauges: HashMap<u64, f32>,      //电池电量表，用于存储设备ID和对应的电量值
+    battery_gauges: HashMap<u64, BatteryData>,//电池电量表，用于存储设备ID和对应的电量值
     steamvr_pipeline_latency: Duration,
     total_pipeline_latency_average: SlidingWindowAverage<Duration>,
     last_vsync_time: Instant,
     frame_interval: Duration,
+    last_nominal_bitrate_stats: NominalBitrateStats,
 }
 
 impl StatisticsManager {
@@ -81,6 +88,7 @@ impl StatisticsManager {
             ),
             last_vsync_time: Instant::now(),
             frame_interval: nominal_server_frame_interval,
+            last_nominal_bitrate_stats: NominalBitrateStats::default(),
         }
     }
 
@@ -136,21 +144,32 @@ impl StatisticsManager {
         }
     }
 
-    pub fn report_frame_encoded(&mut self, target_timestamp: Duration) {
+    // returns encoding interval
+    pub fn report_frame_encoded(
+        &mut self,
+        target_timestamp: Duration,
+        bytes_count: usize,
+    ) -> Duration {
+        self.video_packets_total += 1;
+        self.video_packets_partial_sum += 1;
+        self.video_bytes_total += bytes_count;
+        self.video_bytes_partial_sum += bytes_count;
+
         if let Some(frame) = self
             .history_buffer
             .iter_mut()
             .find(|frame| frame.target_timestamp == target_timestamp)
         {
             frame.frame_encoded = Instant::now();
-        }
-    }
 
-    pub fn report_video_packet(&mut self, bytes_count: usize) {
-        self.video_packets_total += 1;
-        self.video_packets_partial_sum += 1;
-        self.video_bytes_total += bytes_count;
-        self.video_bytes_partial_sum += bytes_count;
+            frame.video_packet_bytes = bytes_count;
+
+            frame
+                .frame_encoded
+                .saturating_duration_since(frame.frame_composed)
+        } else {
+            Duration::ZERO
+        }
     }
 
     pub fn report_packet_loss(&mut self) {
@@ -158,8 +177,15 @@ impl StatisticsManager {
         self.packets_lost_partial_sum += 1;
     }
 
-    pub fn report_battery(&mut self, device_id: u64, gauge_value: f32) {
-        *self.battery_gauges.entry(device_id).or_default() = gauge_value;
+    pub fn report_battery(&mut self, device_id: u64, gauge_value: f32, is_plugged: bool) {
+        *self.battery_gauges.entry(device_id).or_default() = BatteryData {
+            gauge_value,
+            is_plugged,
+        };
+    }
+
+    pub fn report_nominal_bitrate_stats(&mut self, stats: NominalBitrateStats) {
+        self.last_nominal_bitrate_stats = stats;
     }
 
     // Called every frame. Some statistics are reported once every frame
@@ -174,7 +200,10 @@ impl StatisticsManager {
             .find(|frame| frame.target_timestamp == client_stats.target_timestamp)
         {
             //并计算出网络延迟、客户端帧率和服务器帧率等统计信息
-            frame.total_pipeline_latency = client_stats.total_pipeline_latency;
+            
+            let total_pipeline_latency = client_stats.total_pipeline_latency;
+            self.total_pipeline_latency_average
+                .submit_sample(total_pipeline_latency);
             //计算出游戏渲染延迟时间
             let game_time_latency = frame
                 .frame_present
@@ -199,7 +228,7 @@ impl StatisticsManager {
             //网络延迟不能直接估算，它是总延迟减去所有其他延迟间隔的剩余部分。
             //特别地，它包含跟踪包的传输延迟和针对特定帧发送第一个视频包和接收最后一个视频包之间的时间间隔。
             //为了安全起见，使用saturating_sub避免如果网络延迟被错误地计算为负数而导致崩溃。
-            let network_latency = frame.total_pipeline_latency.saturating_sub(
+            let network_latency = total_pipeline_latency.saturating_sub(
                 game_time_latency
                     + server_compositor_latency
                     + encoder_latency
@@ -227,13 +256,14 @@ impl StatisticsManager {
 
                 let interval_secs = FULL_REPORT_INTERVAL.as_secs_f32();
 
-                alvr_events::send_event(EventType::Statistics(Statistics {
+                alvr_events::send_event(EventType::StatisticsSummary(StatisticsSummary {
                     video_packets_total: self.video_packets_total,
                     video_packets_per_sec: (self.video_packets_partial_sum as f32 / interval_secs)
                         as _,
                     video_mbytes_total: (self.video_bytes_total as f32 / 1e6) as usize,
-                    video_mbits_per_sec: self.video_bytes_partial_sum as f32 / interval_secs * 8.
-                        / 1e6,
+                    video_mbits_per_sec: self.video_bytes_partial_sum as f32 * 8.
+                        / 1e6
+                        / interval_secs,
                     total_latency_ms: client_stats.total_pipeline_latency.as_secs_f32() * 1000.,
                     network_latency_ms: network_latency.as_secs_f32() * 1000.,
                     encode_latency_ms: encoder_latency.as_secs_f32() * 1000.,
@@ -248,19 +278,14 @@ impl StatisticsManager {
                         .get(&HEAD_ID)
                         .cloned()
                         .unwrap_or_default()
-                        * 100.) as _,
-                    battery_left: (self
+                        .gauge_value
+                        * 100.) as u32,
+                    hmd_plugged: self
                         .battery_gauges
-                        .get(&LEFT_HAND_ID)
+                        .get(&HEAD_ID)
                         .cloned()
                         .unwrap_or_default()
-                        * 100.) as _,
-                    battery_right: (self
-                        .battery_gauges
-                        .get(&RIGHT_HAND_ID)
-                        .cloned()
-                        .unwrap_or_default()
-                        * 100.) as _,
+                        .is_plugged,
                 }));
 
                 self.video_packets_partial_sum = 0;
@@ -268,6 +293,16 @@ impl StatisticsManager {
                 self.packets_lost_partial_sum = 0;
             }
 
+            // While not accurate, this prevents NaNs and zeros that would cause a crash or pollute
+            // the graph
+            let bitrate_bps = if network_latency != Duration::ZERO {
+                frame.video_packet_bytes as f32 * 8.0 / network_latency.as_secs_f32()
+            } else {
+                0.0
+            };
+
+            // todo: use target timestamp in nanoseconds. the dashboard needs to use the first
+            // timestamp as the graph time origin.
             alvr_events::send_event(EventType::GraphStatistics(GraphStatistics {
                 total_pipeline_latency_s: client_stats.total_pipeline_latency.as_secs_f32(),
                 game_time_s: game_time_latency.as_secs_f32(),
@@ -280,6 +315,8 @@ impl StatisticsManager {
                 vsync_queue_s: client_stats.vsync_queue.as_secs_f32(),
                 client_fps,
                 server_fps,
+                nominal_bitrate: self.last_nominal_bitrate_stats.clone(),
+                actual_bitrate_bps: bitrate_bps,
             }));
 
             network_latency
