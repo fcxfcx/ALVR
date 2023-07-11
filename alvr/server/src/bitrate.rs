@@ -12,7 +12,7 @@ use std::{
 const UPDATE_INTERVAL: Duration = Duration::from_secs(1);
 
 pub struct BitrateManager {
-    nominal_framerate: f32,                                  //新增：帧率
+    nominal_frame_interval: Duration,                        //新增：帧率
     max_history_size: usize,                                 //新增：历史最大值
     frame_interval_average: SlidingWindowAverage<Duration>,  //帧间隔平均值
     packet_sizes_bits_history: VecDeque<(Duration, usize)>,  //新增：历史包大小记录

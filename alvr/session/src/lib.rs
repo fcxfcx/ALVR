@@ -122,7 +122,7 @@ pub struct SessionConfig {
     pub drivers_backup: Option<DriversBackup>, // 连接会话描述 -- 是否显示安装向导
     pub openvr_config: OpenvrConfig,           // 连接会话描述 -- OpenVR配置
     // The hashmap key is the hostname
-    pub client_connections: HashMap<String, ClientConnectionDesc>, // 连接会话描述 -- 客户端连接列表
+    pub client_connections: HashMap<String, ClientConnectionConfig>, // 连接会话描述 -- 客户端连接列表
     pub session_settings: SessionSettings, // 连接会话描述 -- 会话设置(在setting)
 }
 
