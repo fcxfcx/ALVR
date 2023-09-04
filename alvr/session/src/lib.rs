@@ -3,7 +3,11 @@ mod settings;
 pub use settings::*;
 pub use settings_schema;
 
-use alvr_common::{prelude::*, semver::Version, ALVR_VERSION};
+use alvr_common::{
+    anyhow::{bail, Result},
+    semver::Version,
+    ToAny, ALVR_VERSION,
+};
 use serde::{Deserialize, Serialize};
 use serde_json as json;
 use settings_schema::{NumberType, SchemaNode};
@@ -165,7 +169,7 @@ impl SessionConfig {
     // 如果 json_value 不是一个有效的 SessionDesc 表示（因为版本升级），则使用一些模糊逻辑来尽可能多地推断信息。
     // 由于 SessionDesc 不能有一个模板（因为 SessionSettings 也需要有一个模式，但它是由我们无法控制的方式生成的）
     // 我只对字段做基本的名称检查，如果值的类型不匹配，反序列化将失败。因此，`session_settings` 必须单独处理，以便使用设置模式更好地检索数据。
-    pub fn merge_from_json(&mut self, json_value: &json::Value) -> StrResult {
+    pub fn merge_from_json(&mut self, json_value: &json::Value) -> Result<()> {
         const SESSION_SETTINGS_STR: &str = "session_settings";
 
         // 尝试从json格式读取新的会话描述，如果正常读取了，直接返回
@@ -175,8 +179,9 @@ impl SessionConfig {
         }
 
         // 否则，用json格式储存旧的会话描述
-        let old_session_json = json::to_value(&self).map_err(err!())?;
-        let old_session_fields = old_session_json.as_object().ok_or_else(enone!())?;
+        // Note: unwrap is safe because current session is expected to serialize correctly
+        let old_session_json = json::to_value(&self).unwrap();
+        let old_session_fields = old_session_json.as_object().unwrap();
 
         // 最大程度推测新的会话描述
         let maybe_session_settings_json =
@@ -185,7 +190,7 @@ impl SessionConfig {
                 .map(|new_session_settings_json| {
                     // 利用旧的会话描述中的sessionSettings字段和新的会话描述中的sessionSettings字段，推测新的sessionSettings字段
                     extrapolate_session_settings_from_session_settings(
-                        &old_session_json[SESSION_SETTINGS_STR],
+                        &old_session_fields[SESSION_SETTINGS_STR],
                         new_session_settings_json,
                         &Settings::schema(settings::session_settings_default()),
                     )
@@ -208,7 +213,9 @@ impl SessionConfig {
         let mut session_desc_mut =
             json::from_value::<SessionConfig>(json::Value::Object(new_fields)).unwrap_or_default();
 
-        match json::from_value::<SessionSettings>(maybe_session_settings_json.ok_or_else(enone!())?)
+        match maybe_session_settings_json
+            .to_any()
+            .and_then(|s| serde_json::from_value::<SessionSettings>(s).map_err(|e| e.into()))
         {
             // 如果sessionSettings字段正常读取，会添加到session_desc_mut中
             Ok(session_settings) => {
@@ -219,7 +226,7 @@ impl SessionConfig {
             Err(e) => {
                 *self = session_desc_mut;
 
-                fmt_e!("Error while deserializing extrapolated session settings: {e}")
+                bail!("Error while deserializing extrapolated session settings: {e}")
             }
         }
     }
@@ -248,8 +255,8 @@ fn extrapolate_session_settings_from_session_settings(
     schema: &SchemaNode,
 ) -> json::Value {
     match schema {
-        SchemaNode::Section(entries) => json::Value::Object(
-            entries
+        SchemaNode::Section(entries) => json::Value::Object({
+            let mut entries: json::Map<String, json::Value> = entries
                 .iter()
                 .map(|named_entry| {
                     let value_json =
@@ -264,8 +271,22 @@ fn extrapolate_session_settings_from_session_settings(
                         };
                     (named_entry.name.clone(), value_json)
                 })
-                .collect(),
-        ),
+                .collect();
+
+            let collapsed_state = new_session_settings
+                .get("gui_collapsed")
+                .and_then(|val| val.as_bool())
+                .unwrap_or_else(|| {
+                    old_session_settings
+                        .get("gui_collapsed")
+                        .unwrap()
+                        .as_bool()
+                        .unwrap()
+                });
+            entries.insert("gui_collapsed".into(), json::Value::Bool(collapsed_state));
+
+            entries
+        }),
 
         SchemaNode::Choice { variants, .. } => {
             let variant_json = new_session_settings
@@ -592,11 +613,13 @@ mod tests {
     fn test_session_extrapolation_diff() {
         let input_json_string = r#"{
             "session_settings": {
-              "fjdshfks":false,
+              "gui_collapsed": false,
+              "fjdshfks": false,
               "video": {
                 "preferred_fps": 60.0
               },
               "headset": {
+                "gui_collapsed": false,
                 "controllers": {
                   "enabled": false
                 }

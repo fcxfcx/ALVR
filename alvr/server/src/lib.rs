@@ -23,11 +23,12 @@ mod bindings {
 use bindings::*;
 
 use alvr_common::{
+    error,
     glam::Quat,
     log,
     once_cell::sync::Lazy,
     parking_lot::{Mutex, RwLock},
-    prelude::*,
+    LazyMutOpt,
 };
 use alvr_events::{BitrateSelection, EventType};
 use alvr_filesystem::{self as afs, Layout};
@@ -35,10 +36,11 @@ use alvr_packets::{ClientListAction, DecoderInitializationConfig, VideoPacketHea
 use alvr_server_io::ServerDataManager;
 use alvr_session::{CodecType, ConnectionState};
 use bitrate::BitrateManager;
-use connection::SHOULD_CONNECT_TO_CLIENTS;
+use connection::{ClientDisconnectRequest, DISCONNECT_CLIENT_NOTIFIER, SHOULD_CONNECT_TO_CLIENTS};
 use statistics::StatisticsManager;
 use std::{
     collections::HashMap,
+    env,
     ffi::{c_char, c_void, CStr, CString},
     fs::File,
     io::Write,
@@ -48,20 +50,18 @@ use std::{
     time::{Duration, Instant},
 };
 use sysinfo::{ProcessRefreshKind, RefreshKind, SystemExt};
-use tokio::{
-    runtime::Runtime,
-    sync::{broadcast, Notify},
-};
+use tokio::{runtime::Runtime, sync::broadcast};
 
 static FILESYSTEM_LAYOUT: Lazy<Layout> = Lazy::new(|| {
-    afs::filesystem_layout_from_openvr_driver_root_dir(&alvr_server_io::get_driver_dir().unwrap())
+    afs::filesystem_layout_from_openvr_driver_root_dir(
+        &alvr_server_io::get_driver_dir_from_registered().unwrap(),
+    )
 });
 static SERVER_DATA_MANAGER: Lazy<RwLock<ServerDataManager>> =
     Lazy::new(|| RwLock::new(ServerDataManager::new(&FILESYSTEM_LAYOUT.session())));
-static WEBSERVER_RUNTIME: Lazy<Mutex<Option<Runtime>>> =
-    Lazy::new(|| Mutex::new(Runtime::new().ok()));
+static WEBSERVER_RUNTIME: LazyMutOpt<Runtime> = Lazy::new(|| Mutex::new(Runtime::new().ok()));
 
-static STATISTICS_MANAGER: Lazy<Mutex<Option<StatisticsManager>>> = Lazy::new(|| Mutex::new(None));
+static STATISTICS_MANAGER: LazyMutOpt<StatisticsManager> = alvr_common::lazy_mut_none();
 static BITRATE_MANAGER: Lazy<Mutex<BitrateManager>> = Lazy::new(|| {
     let data_lock = SERVER_DATA_MANAGER.read();
     let settings = data_lock.settings();
@@ -78,12 +78,8 @@ pub struct VideoPacket {
     pub payload: Vec<u8>,
 }
 
-static VIDEO_MIRROR_SENDER: Lazy<Mutex<Option<broadcast::Sender<Vec<u8>>>>> =
-    Lazy::new(|| Mutex::new(None));
-static VIDEO_RECORDING_FILE: Lazy<Mutex<Option<File>>> = Lazy::new(|| Mutex::new(None));
-
-static DISCONNECT_CLIENT_NOTIFIER: Lazy<Notify> = Lazy::new(Notify::new);
-static RESTART_NOTIFIER: Lazy<Notify> = Lazy::new(Notify::new);
+static VIDEO_MIRROR_SENDER: LazyMutOpt<broadcast::Sender<Vec<u8>>> = alvr_common::lazy_mut_none();
+static VIDEO_RECORDING_FILE: LazyMutOpt<File> = alvr_common::lazy_mut_none();
 
 static FRAME_RENDER_VS_CSO: &[u8] = include_bytes!("../cpp/platform/win32/FrameRenderVS.cso");
 static FRAME_RENDER_PS_CSO: &[u8] = include_bytes!("../cpp/platform/win32/FrameRenderPS.cso");
@@ -99,8 +95,7 @@ static FFR_SHADER_COMP_SPV: &[u8] = include_bytes!("../cpp/platform/linux/shader
 static RGBTOYUV420_SHADER_COMP_SPV: &[u8] =
     include_bytes!("../cpp/platform/linux/shader/rgbtoyuv420.comp.spv");
 
-static DECODER_CONFIG: Lazy<Mutex<Option<DecoderInitializationConfig>>> =
-    Lazy::new(|| Mutex::new(None));
+static DECODER_CONFIG: LazyMutOpt<DecoderInitializationConfig> = alvr_common::lazy_mut_none();
 
 fn to_ffi_quat(quat: Quat) -> FfiQuat {
     FfiQuat {
@@ -119,7 +114,10 @@ pub fn create_recording_file() {
         "h265"
     };
 
-    let path = FILESYSTEM_LAYOUT.log_dir.join(format!("recording.{ext}"));
+    let path = FILESYSTEM_LAYOUT.log_dir.join(format!(
+        "recording.{}.{ext}",
+        chrono::Local::now().format("%F.%H-%M-%S")
+    ));
 
     match File::create(path) {
         Ok(mut file) => {
@@ -168,7 +166,9 @@ pub extern "C" fn shutdown_driver() {
         }
     }
 
-    DISCONNECT_CLIENT_NOTIFIER.notify_waiters();
+    if let Some(notifier) = &*DISCONNECT_CLIENT_NOTIFIER.lock() {
+        notifier.send(ClientDisconnectRequest::ServerShutdown).ok();
+    }
 
     // apply openvr config for the next launch
     SERVER_DATA_MANAGER.write().session_mut().openvr_config = connection::contruct_openvr_config();
@@ -217,7 +217,9 @@ pub fn notify_restart_driver() {
 // This call is blocking
 pub fn restart_driver() {
     SHOULD_CONNECT_TO_CLIENTS.set(false);
-    RESTART_NOTIFIER.notify_waiters();
+    if let Some(notifier) = &*DISCONNECT_CLIENT_NOTIFIER.lock() {
+        notifier.send(ClientDisconnectRequest::ServerRestart).ok();
+    }
 
     shutdown_driver();
 }
@@ -226,13 +228,20 @@ fn init() {
     let (events_sender, _) = broadcast::channel(web_server::WS_BROADCAST_CAPACITY);
     logging_backend::init_logging(events_sender.clone());
 
-    if let Some(runtime) = WEBSERVER_RUNTIME.lock().as_mut() {
-        runtime.spawn(alvr_common::show_err_async(web_server::web_server(
-            events_sender,
-        )));
+    if SERVER_DATA_MANAGER
+        .read()
+        .settings()
+        .logging
+        .prefer_backtrace
+    {
+        env::set_var("RUST_BACKTRACE", "1");
     }
 
     SERVER_DATA_MANAGER.write().clean_client_list();
+
+    if let Some(runtime) = WEBSERVER_RUNTIME.lock().as_mut() {
+        runtime.spawn(async { alvr_common::show_err(web_server::web_server(events_sender).await) });
+    }
 
     unsafe {
         g_sessionPath = CString::new(FILESYSTEM_LAYOUT.session().to_string_lossy().to_string())
@@ -317,7 +326,7 @@ pub unsafe extern "C" fn HmdDriverFactory(
         }
     }
 
-    extern "C" fn initialize_decoder(buffer_ptr: *const u8, len: i32, codec: i32) {
+    extern "C" fn set_video_config_nals(buffer_ptr: *const u8, len: i32, codec: i32) {
         let codec = if codec == 0 {
             CodecType::H264
         } else {
@@ -347,14 +356,12 @@ pub unsafe extern "C" fn HmdDriverFactory(
 
         thread::spawn(move || {
             if set_default_chap {
-                // call this when inside a new tokio thread. Calling this on the parent thread will
-                // crash SteamVR
+                // call this when inside a new thread. Calling this on the parent thread will crash
+                // SteamVR
                 unsafe { SetChaperone(2.0, 2.0) };
             }
 
-            if let Err(InterruptibleError::Other(e)) = connection::handshake_loop() {
-                warn!("Connection thread closed: {e}");
-            }
+            connection::handshake_loop();
         });
     }
 
@@ -431,7 +438,7 @@ pub unsafe extern "C" fn HmdDriverFactory(
     LogDebug = Some(log_debug);
     LogPeriodically = Some(log_periodically);
     DriverReadyIdle = Some(driver_ready_idle);
-    InitializeDecoder = Some(initialize_decoder);
+    SetVideoConfigNals = Some(set_video_config_nals);
     VideoSend = Some(connection::send_video);
     HapticsSend = Some(connection::send_haptics);
     ShutdownRuntime = Some(shutdown_driver);

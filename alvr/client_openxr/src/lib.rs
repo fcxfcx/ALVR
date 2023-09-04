@@ -2,10 +2,11 @@ mod interaction;
 
 use alvr_client_core::{opengl::RenderViewInput, ClientCoreEvent};
 use alvr_common::{
+    error,
     glam::{Quat, UVec2, Vec2, Vec3},
-    prelude::*,
+    info,
     settings_schema::Switch,
-    DeviceMotion, Fov, Pose, RelaxedAtomic, HEAD_ID, LEFT_HAND_ID, RIGHT_HAND_ID,
+    warn, DeviceMotion, Fov, Pose, RelaxedAtomic, HEAD_ID, LEFT_HAND_ID, RIGHT_HAND_ID,
 };
 use alvr_packets::{FaceData, Tracking};
 use alvr_session::ClientsideFoveationMode;
@@ -21,6 +22,8 @@ use std::{
     time::{Duration, Instant},
 };
 
+// When the latency goes too high, if prediction offset is not capped tracking poll will fail.
+const MAX_PREDICTION: Duration = Duration::from_millis(70);
 const IPD_CHANGE_EPS: f32 = 0.001;
 const DECODER_MAX_TIMEOUT_MULTIPLIER: f32 = 0.8;
 
@@ -28,8 +31,9 @@ const DECODER_MAX_TIMEOUT_MULTIPLIER: f32 = 0.8;
 #[derive(PartialEq, Eq, Clone, Copy)]
 pub enum Platform {
     Quest,
-    Pico,
-    Vive,
+    PicoNeo3,
+    Pico4,
+    Focus3,
     Yvr,
     Other,
 }
@@ -235,20 +239,20 @@ fn update_streaming_input(ctx: &mut StreamingInputContext) {
         return;
     };
 
-    // 头部预测？？
-    let target_timestamp = now + alvr_client_core::get_head_prediction_offset();
+    let target_timestamp = now
+        + Duration::min(
+            alvr_client_core::get_head_prediction_offset(),
+            MAX_PREDICTION,
+        );
 
     let mut device_motions = Vec::with_capacity(3);
 
     'head_tracking: {
-        let Ok((view_flags, views)) = ctx
-            .xr_session
-            .locate_views(
-                xr::ViewConfigurationType::PRIMARY_STEREO,
-                to_xr_time(target_timestamp),
-                &ctx.reference_space,
-            )
-        else {
+        let Ok((view_flags, views)) = ctx.xr_session.locate_views(
+            xr::ViewConfigurationType::PRIMARY_STEREO,
+            to_xr_time(target_timestamp),
+            &ctx.reference_space,
+        ) else {
             error!("Cannot locate views");
             break 'head_tracking;
         };
@@ -292,7 +296,12 @@ fn update_streaming_input(ctx: &mut StreamingInputContext) {
         ));
     }
 
-    let tracker_time = to_xr_time(now + alvr_client_core::get_tracker_prediction_offset());
+    let tracker_time = to_xr_time(
+        now + Duration::min(
+            alvr_client_core::get_tracker_prediction_offset(),
+            MAX_PREDICTION,
+        ),
+    );
 
     let (left_hand_motion, left_hand_skeleton) = interaction::get_hand_motion(
         &ctx.xr_session,
@@ -347,11 +356,15 @@ fn update_streaming_input(ctx: &mut StreamingInputContext) {
 pub fn entry_point() {
     alvr_client_core::init_logging();
 
-    let platform = match alvr_client_core::manufacturer_name().as_str() {
-        "Oculus" => Platform::Quest,
-        "Pico" => Platform::Pico,
-        "HTC" => Platform::Vive,
-        "YVR" => Platform::Yvr,
+    let platform = match (
+        alvr_client_core::manufacturer_name().as_str(),
+        alvr_client_core::device_model().as_str(),
+    ) {
+        ("Oculus", _) => Platform::Quest,
+        ("Pico", "Pico Neo 3") => Platform::PicoNeo3,
+        ("Pico", _) => Platform::Pico4,
+        ("HTC", _) => Platform::Focus3,
+        ("YVR", _) => Platform::Yvr,
         _ => Platform::Other,
     };
 
@@ -359,7 +372,7 @@ pub fn entry_point() {
         Platform::Quest => unsafe {
             xr::Entry::load_from(Path::new("libopenxr_loader_quest.so")).unwrap()
         },
-        Platform::Pico => unsafe {
+        Platform::PicoNeo3 | Platform::Pico4 => unsafe {
             xr::Entry::load_from(Path::new("libopenxr_loader_pico.so")).unwrap()
         },
         Platform::Yvr => unsafe {

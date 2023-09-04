@@ -28,7 +28,6 @@ First, flatpak must be installed from your distro's repositories. Refer to [this
 
 Once Flatpak is installed, the flatpak dependencies must also be installed. They are:
 
-* Flatpak Builder
 * Rust
 * LLVM
 * Freedesktop SDK
@@ -37,8 +36,7 @@ Once Flatpak is installed, the flatpak dependencies must also be installed. They
 These can be installed like so:
 
 ```
-flatpak install flathub org.flatpak.Builder \
-    org.freedesktop.Sdk//22.08 \
+flatpak install flathub org.freedesktop.Sdk//22.08 \
     org.freedesktop.Sdk.Extension.llvm16//22.08 \
     org.freedesktop.Sdk.Extension.rust-stable//22.08 \
     com.valvesoftware.Steam
@@ -51,7 +49,35 @@ flatpak install flathub org.freedesktop.Platform.GL.default//22.08-extra \
    org.freedesktop.Platform.GL32.default//22.08-extra
 ```
 
+## Setup
+
+Install SteamVR via the Steam Flatpak. After installing SteamVR, run the following command:
+
+```
+sudo setcap CAP_SYS_NICE+ep ~/.var/app/com.valvesoftware.Steam/data/Steam/steamapps/common/SteamVR/bin/linux64/vrcompositor-launcher
+```
+
+This command is normally run by SteamVR, but due to the lack of sudo access within the Flatpak sandbox, it must be run outside of the Flatpak sandbox. After running the command, run SteamVR once then close it.
+
+## Install
+
+Download `com.valvesoftware.Steam.Utility.alvr.flatpak` file from one of the latest [nightly](https://github.com/alvr-org/ALVR-nightly/releases) that contains flatpak bundle and install like so:
+
+```
+flatpak --user install --bundle com.valvesoftware.Steam.Utility.alvr.flatpak
+```
+
+Use apk for headset from the same nightly.
+
 ## Build and Install
+
+Alternatively, if the file is not available or a newer version is needed, the flatpak can be built from source and installed.
+
+First, the dependencies from above must be fulfilled. Then, install `flatpak-builder` like so:
+
+```
+flatpak install flathub org.flatpak.Builder
+```
 
 Once the dependencies are fulfilled, clone and enter the repository.
 

@@ -1,7 +1,8 @@
+use anyhow::Result;
 use backtrace::Backtrace;
 use serde::{Deserialize, Serialize};
 use settings_schema::SettingsSchema;
-use std::{fmt::Display, future::Future};
+use std::{error::Error, fmt::Display};
 
 #[derive(
     SettingsSchema, Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord,
@@ -48,7 +49,7 @@ pub fn set_panic_hook() {
 
         log::error!("{err_str}");
 
-        #[cfg(not(target_os = "android"))]
+        #[cfg(all(not(target_os = "android"), feature = "enable-messagebox"))]
         std::thread::spawn(move || {
             rfd::MessageDialog::new()
                 .set_title("ALVR panicked")
@@ -62,7 +63,7 @@ pub fn set_panic_hook() {
 pub fn show_w<W: Display + Send + 'static>(w: W) {
     log::warn!("{w}");
 
-    #[cfg(not(target_os = "android"))]
+    #[cfg(all(not(target_os = "android"), feature = "enable-messagebox"))]
     std::thread::spawn(move || {
         rfd::MessageDialog::new()
             .set_title("ALVR warning")
@@ -80,7 +81,7 @@ pub fn show_warn<T, E: Display + Send + 'static>(res: Result<T, E>) -> Option<T>
 fn show_e_block<E: Display>(e: E, blocking: bool) {
     log::error!("{e}");
 
-    #[cfg(not(target_os = "android"))]
+    #[cfg(all(not(target_os = "android"), feature = "enable-messagebox"))]
     {
         // Store the last error shown in a message box. Do not open a new message box if the content
         // of the error has not changed
@@ -134,63 +135,24 @@ pub fn show_err_blocking<T, E: Display>(res: Result<T, E>) -> Option<T> {
     res.map_err(|e| show_e_block(e, true)).ok()
 }
 
-pub async fn show_err_async<T, E: Display>(
-    future_res: impl Future<Output = Result<T, E>>,
-) -> Option<T> {
-    show_err(future_res.await)
+pub trait ToAny<T> {
+    fn to_any(self) -> Result<T>;
 }
 
-#[macro_export]
-macro_rules! fmt_e {
-    ($($args:tt)+) => {
-        Err(format!($($args)+))
-    };
-}
-
-#[macro_export]
-macro_rules! err {
-    () => {
-        |e| format!("At {}:{}: {e}", file!(), line!())
-    };
-}
-
-// trace_err variant for errors that do not implement fmt::Display
-#[macro_export]
-macro_rules! err_dbg {
-    () => {
-        |e| format!("At {}:{}: {e:?}", file!(), line!())
-    };
-}
-
-#[macro_export]
-macro_rules! enone {
-    () => {
-        || format!("At {}:{}", file!(), line!())
-    };
-}
-
-#[macro_export]
-macro_rules! int_fmt_e {
-    ($($args:tt)+) => {
-        Err(InterruptibleError::Other(format!($($args)+)))
-    };
-}
-
-#[macro_export]
-macro_rules! int_e {
-    () => {
-        |e| match e {
-            InterruptibleError::Interrupted => InterruptibleError::Interrupted,
-            InterruptibleError::Other(e) => {
-                InterruptibleError::Other(format!("At {}:{}: {e}", file!(), line!()))
-            }
+impl<T> ToAny<T> for Option<T> {
+    fn to_any(self) -> Result<T> {
+        match self {
+            Some(value) => Ok(value),
+            None => Err(anyhow::anyhow!("Unexpected None")),
         }
-    };
+    }
 }
 
-#[macro_export]
-macro_rules! to_int_e {
-    () => {
-        |e| InterruptibleError::Other(format!("At {}:{}: {e}", file!(), line!()))
-    };
+impl<T, E: Error + Send + Sync + 'static> ToAny<T> for Result<T, E> {
+    fn to_any(self) -> Result<T> {
+        match self {
+            Ok(value) => Ok(value),
+            Err(e) => Err(e.into()),
+        }
+    }
 }

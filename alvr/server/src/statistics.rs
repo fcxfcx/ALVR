@@ -16,6 +16,7 @@ pub struct HistoryFrame {
     frame_composed: Instant,          //帧组成时间
     frame_encoded: Instant,           //帧编码时间
     video_packet_bytes: usize,
+    total_pipeline_latency: Duration,
 }
 
 impl Default for HistoryFrame {
@@ -29,6 +30,7 @@ impl Default for HistoryFrame {
             frame_composed: now,                    // 帧合成时间，初始化为当前时间
             frame_encoded: now,                     // 帧编码时间，初始化为当前时间
             video_packet_bytes: 0,
+            total_pipeline_latency: Duration::ZERO,
         }
     }
 }
@@ -199,12 +201,8 @@ impl StatisticsManager {
             .iter_mut()
             .find(|frame| frame.target_timestamp == client_stats.target_timestamp)
         {
-            //并计算出网络延迟、客户端帧率和服务器帧率等统计信息
-            
-            let total_pipeline_latency = client_stats.total_pipeline_latency;
-            self.total_pipeline_latency_average
-                .submit_sample(total_pipeline_latency);
-            //计算出游戏渲染延迟时间
+            frame.total_pipeline_latency = client_stats.total_pipeline_latency;
+
             let game_time_latency = frame
                 .frame_present
                 .saturating_duration_since(frame.tracking_received);
@@ -228,7 +226,7 @@ impl StatisticsManager {
             //网络延迟不能直接估算，它是总延迟减去所有其他延迟间隔的剩余部分。
             //特别地，它包含跟踪包的传输延迟和针对特定帧发送第一个视频包和接收最后一个视频包之间的时间间隔。
             //为了安全起见，使用saturating_sub避免如果网络延迟被错误地计算为负数而导致崩溃。
-            let network_latency = total_pipeline_latency.saturating_sub(
+            let network_latency = frame.total_pipeline_latency.saturating_sub(
                 game_time_latency
                     + server_compositor_latency
                     + encoder_latency

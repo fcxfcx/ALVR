@@ -1,23 +1,25 @@
 use crate::{
     bitrate::BitrateManager,
     buttons::BUTTON_PATH_FROM_ID,
+    create_recording_file,
     face_tracking::FaceTrackingSink,
     haptics,
     sockets::WelcomeSocket,
     statistics::StatisticsManager,
     tracking::{self, TrackingManager},
     FfiButtonValue, FfiFov, FfiViewsConfig, VideoPacket, BITRATE_MANAGER, DECODER_CONFIG,
-    DISCONNECT_CLIENT_NOTIFIER, RESTART_NOTIFIER, SERVER_DATA_MANAGER, STATISTICS_MANAGER,
-    VIDEO_MIRROR_SENDER, VIDEO_RECORDING_FILE,
+    SERVER_DATA_MANAGER, STATISTICS_MANAGER, VIDEO_MIRROR_SENDER, VIDEO_RECORDING_FILE,
 };
 use alvr_audio::AudioDevice;
 use alvr_common::{
+    con_bail, debug, error,
     glam::{UVec2, Vec2},
+    info,
     once_cell::sync::Lazy,
-    parking_lot::{Mutex, RwLock},
-    prelude::*,
+    parking_lot::Mutex,
     settings_schema::Switch,
-    RelaxedAtomic, DEVICE_ID_TO_PATH, HEAD_ID, LEFT_HAND_ID, RIGHT_HAND_ID,
+    warn, AnyhowToCon, ConResult, ConnectionError, LazyMutOpt, RelaxedAtomic, ToCon,
+    DEVICE_ID_TO_PATH, HEAD_ID, LEFT_HAND_ID, RIGHT_HAND_ID,
 };
 
 use alvr_events::{ButtonEvent, EventType, HapticsEvent, TrackingEvent, MotionStatistics, NetworkStatistics};
@@ -28,36 +30,44 @@ use alvr_packets::{
 };
 use alvr_session::{CodecType, ConnectionState, ControllersEmulationMode, FrameSize, OpenvrConfig};
 use alvr_sockets::{
-    spawn_cancelable, PeerType, ProtoControlSocket, StreamSender, StreamSocketBuilder,
-    KEEPALIVE_INTERVAL,
+    PeerType, ProtoControlSocket, StreamSender, StreamSocketBuilder, KEEPALIVE_INTERVAL,
 };
-use futures::future::BoxFuture;
 use std::{
     collections::HashMap,
-    future,
     io::Write,
     net::IpAddr,
     process::Command,
     ptr,
     sync::{
         atomic::{AtomicBool, Ordering},
-        mpsc::{RecvTimeoutError, SyncSender, TrySendError},
+        mpsc::{self, RecvTimeoutError, SyncSender, TrySendError},
         Arc,
     },
     thread,
-    time::{Duration,Instant}
+    time::{Duration, Instant},
 };
-use tokio::{runtime::Runtime, sync::Mutex as TMutex, time};
 
 const RETRY_CONNECT_MIN_INTERVAL: Duration = Duration::from_secs(1);
-const FULL_REPORT_INTERVAL: Duration = Duration::from_millis(500);
+const HANDSHAKE_ACTION_TIMEOUT: Duration = Duration::from_secs(2);
+const STREAMING_RECV_TIMEOUT: Duration = Duration::from_millis(500);
+
+const MAX_UNREAD_PACKETS: usize = 10; // Applies per stream
 
 pub static SHOULD_CONNECT_TO_CLIENTS: Lazy<Arc<RelaxedAtomic>> =
     Lazy::new(|| Arc::new(RelaxedAtomic::new(false)));
-static CONNECTION_RUNTIME: Lazy<RwLock<Option<Runtime>>> = Lazy::new(|| RwLock::new(None));
-static VIDEO_CHANNEL_SENDER: Lazy<Mutex<Option<SyncSender<VideoPacket>>>> =
-    Lazy::new(|| Mutex::new(None));
-static HAPTICS_SENDER: Lazy<Mutex<Option<StreamSender<Haptics>>>> = Lazy::new(|| Mutex::new(None));
+pub static IS_STREAMING: Lazy<Arc<RelaxedAtomic>> =
+    Lazy::new(|| Arc::new(RelaxedAtomic::new(false)));
+static VIDEO_CHANNEL_SENDER: LazyMutOpt<SyncSender<VideoPacket>> = alvr_common::lazy_mut_none();
+static HAPTICS_SENDER: LazyMutOpt<StreamSender<Haptics>> = alvr_common::lazy_mut_none();
+
+pub enum ClientDisconnectRequest {
+    Disconnect,
+    ServerShutdown,
+    ServerRestart,
+}
+
+pub static DISCONNECT_CLIENT_NOTIFIER: LazyMutOpt<mpsc::Sender<ClientDisconnectRequest>> =
+    alvr_common::lazy_mut_none();
 
 fn align32(value: f32) -> u32 {
     ((value / 32.).floor() * 32.) as u32
@@ -204,12 +214,16 @@ pub fn contruct_openvr_config() -> OpenvrConfig {
 }
 
 // Alternate connection trials with manual IPs and clients discovered on the local network
-pub fn handshake_loop() -> IntResult {
-    let mut welcome_socket = WelcomeSocket::new().map_err(to_int_e!())?;
+pub fn handshake_loop() {
+    let mut welcome_socket = match WelcomeSocket::new(RETRY_CONNECT_MIN_INTERVAL) {
+        Ok(socket) => socket,
+        Err(e) => {
+            error!("Failed to create discovery socket: {e:?}");
+            return;
+        }
+    };
 
-    loop {
-        check_interrupt!(SHOULD_CONNECT_TO_CLIENTS.value());
-
+    while SHOULD_CONNECT_TO_CLIENTS.value() {
         let available_manual_client_ips = {
             let mut manual_client_ips = HashMap::new();
             for (hostname, connection_info) in SERVER_DATA_MANAGER
@@ -239,14 +253,13 @@ pub fn handshake_loop() -> IntResult {
             .client_discovery
             .clone();
         if let Switch::Enabled(config) = discovery_config {
-            let (client_hostname, client_ip) = match welcome_socket.recv_non_blocking() {
+            let (client_hostname, client_ip) = match welcome_socket.recv() {
                 Ok(pair) => pair,
                 Err(e) => {
-                    if let InterruptibleError::Other(e) = e {
-                        warn!("UDP handshake listening error: {e}");
+                    if let ConnectionError::Other(e) = e {
+                        warn!("UDP handshake listening error: {e:?}");
                     }
 
-                    thread::sleep(RETRY_CONNECT_MIN_INTERVAL);
                     continue;
                 }
             };
@@ -296,22 +309,14 @@ pub fn handshake_loop() -> IntResult {
     }
 }
 
-fn try_connect(mut client_ips: HashMap<IpAddr, String>) -> IntResult {
-    let runtime = Runtime::new().map_err(to_int_e!())?;
+fn try_connect(mut client_ips: HashMap<IpAddr, String>) -> ConResult {
+    let (mut proto_socket, client_ip) = ProtoControlSocket::connect_to(
+        Duration::from_secs(1),
+        PeerType::AnyClient(client_ips.keys().cloned().collect()),
+    )?;
 
-    let (mut proto_socket, client_ip) = runtime
-        .block_on(async {
-            let get_proto_socket = ProtoControlSocket::connect_to(PeerType::AnyClient(
-                client_ips.keys().cloned().collect(),
-            ));
-            tokio::select! {
-                proto_socket = get_proto_socket => proto_socket,
-                _ = time::sleep(Duration::from_secs(1)) => {
-                    fmt_e!("Control socket failed to connect")
-                }
-            }
-        })
-        .map_err(to_int_e!())?;
+    let (disconnect_sender, disconnect_receiver) = mpsc::channel();
+    *DISCONNECT_CLIENT_NOTIFIER.lock() = Some(disconnect_sender);
 
     // Safety: this never panics because client_ip is picked from client_ips keys
     let client_hostname = client_ips.remove(&client_ip).unwrap();
@@ -339,6 +344,8 @@ fn try_connect(mut client_ips: HashMap<IpAddr, String>) -> IntResult {
                 self.hostname.clone(),
                 ClientListAction::SetConnectionState(ConnectionState::Disconnected),
             );
+
+            *DISCONNECT_CLIENT_NOTIFIER.lock() = None;
         }
     }
     let _connection_drop_guard = DropGuard {
@@ -360,14 +367,8 @@ fn try_connect(mut client_ips: HashMap<IpAddr, String>) -> IntResult {
         display_name,
         streaming_capabilities,
         ..
-    } = runtime.block_on(async {
-        tokio::select! {
-            res = proto_socket.recv() => res.map_err(to_int_e!()),
-            _ = time::sleep(Duration::from_secs(1)) => {
-                int_fmt_e!("Timeout while waiting on client response")
-            }
-        }
-    })? {
+    } = proto_socket.recv(HANDSHAKE_ACTION_TIMEOUT)?
+    {
         SERVER_DATA_MANAGER.write().update_client_list(
             client_hostname.clone(),
             ClientListAction::SetDisplayName(display_name),
@@ -392,7 +393,7 @@ fn try_connect(mut client_ips: HashMap<IpAddr, String>) -> IntResult {
     let streaming_caps = if let Some(streaming_caps) = maybe_streaming_caps {
         streaming_caps
     } else {
-        return int_fmt_e!("Only streaming clients are supported for now");
+        con_bail!("Only streaming clients are supported for now");
     };
 
     let settings = SERVER_DATA_MANAGER.read().settings().clone();
@@ -445,38 +446,37 @@ fn try_connect(mut client_ips: HashMap<IpAddr, String>) -> IntResult {
         warn!("Chosen refresh rate not supported. Using {fps}Hz");
     }
 
-    let game_audio_sample_rate = if let Switch::Enabled(game_audio_config) =
-        &settings.audio.game_audio
-    {
-        let game_audio_device = AudioDevice::new_output(
-            Some(settings.audio.linux_backend),
-            game_audio_config.device.as_ref(),
-        )
-        .map_err(to_int_e!())?;
-
-        #[cfg(not(target_os = "linux"))]
-        if let Switch::Enabled(microphone_desc) = &settings.audio.microphone {
-            let (sink, source) = AudioDevice::new_virtual_microphone_pair(
+    let game_audio_sample_rate =
+        if let Switch::Enabled(game_audio_config) = &settings.audio.game_audio {
+            let game_audio_device = AudioDevice::new_output(
                 Some(settings.audio.linux_backend),
-                microphone_desc.devices.clone(),
+                game_audio_config.device.as_ref(),
             )
-            .map_err(to_int_e!())?;
-            if alvr_audio::is_same_device(&game_audio_device, &sink)
-                || alvr_audio::is_same_device(&game_audio_device, &source)
-            {
-                return int_fmt_e!("Game audio and microphone cannot point to the same device!");
-            }
-        }
+            .to_con()?;
 
-        game_audio_device.input_sample_rate().map_err(to_int_e!())?
-    } else {
-        0
-    };
+            #[cfg(not(target_os = "linux"))]
+            if let Switch::Enabled(microphone_desc) = &settings.audio.microphone {
+                let (sink, source) = AudioDevice::new_virtual_microphone_pair(
+                    Some(settings.audio.linux_backend),
+                    microphone_desc.devices.clone(),
+                )
+                .to_con()?;
+                if alvr_audio::is_same_device(&game_audio_device, &sink)
+                    || alvr_audio::is_same_device(&game_audio_device, &source)
+                {
+                    con_bail!("Game audio and microphone cannot point to the same device!");
+                }
+            }
+
+            game_audio_device.input_sample_rate().to_con()?
+        } else {
+            0
+        };
 
     let client_config = StreamConfigPacket {
         session: {
             let session = SERVER_DATA_MANAGER.read().session().clone();
-            serde_json::to_string(&session).map_err(to_int_e!())?
+            serde_json::to_string(&session).to_con()?
         },
         negotiated: serde_json::json!({
             "view_resolution": stream_view_resolution,
@@ -485,11 +485,10 @@ fn try_connect(mut client_ips: HashMap<IpAddr, String>) -> IntResult {
         })
         .to_string(),
     };
-    runtime
-        .block_on(proto_socket.send(&client_config))
-        .map_err(to_int_e!())?;
+    proto_socket.send(&client_config).to_con()?;
 
-    let (mut control_sender, mut control_receiver) = proto_socket.split();
+    let (mut control_sender, mut control_receiver) =
+        proto_socket.split(STREAMING_RECV_TIMEOUT).to_con()?;
 
     let mut new_openvr_config = contruct_openvr_config();
     new_openvr_config.eye_resolution_width = stream_view_resolution.x;
@@ -501,30 +500,18 @@ fn try_connect(mut client_ips: HashMap<IpAddr, String>) -> IntResult {
     if SERVER_DATA_MANAGER.read().session().openvr_config != new_openvr_config {
         SERVER_DATA_MANAGER.write().session_mut().openvr_config = new_openvr_config;
 
-        runtime
-            .block_on(control_sender.send(&ServerControlPacket::Restarting))
-            .ok();
+        control_sender.send(&ServerControlPacket::Restarting).ok();
 
         crate::notify_restart_driver();
     }
 
-    runtime
-        .block_on(control_sender.send(&ServerControlPacket::StartStream))
-        .map_err(to_int_e!())?;
+    control_sender
+        .send(&ServerControlPacket::StartStream)
+        .to_con()?;
 
-    match runtime.block_on(async {
-        tokio::select! {
-            res = control_receiver.recv() => res.map_err(to_int_e!()),
-            _ = time::sleep(Duration::from_secs(1)) => int_fmt_e!("Timeout"),
-        }
-    }) {
-        Ok(ClientControlPacket::StreamReady) => (),
-        Ok(_) => {
-            return int_fmt_e!("Got unexpected packet waiting for stream ack");
-        }
-        Err(e) => {
-            return int_fmt_e!("Error while waiting for stream ack: {e}");
-        }
+    let signal = control_receiver.recv(HANDSHAKE_ACTION_TIMEOUT)?;
+    if !matches!(signal, ClientControlPacket::StreamReady) {
+        con_bail!("Got unexpected packet waiting for stream ack");
     }
 
     *STATISTICS_MANAGER.lock() = Some(StatisticsManager::new(
@@ -539,50 +526,66 @@ fn try_connect(mut client_ips: HashMap<IpAddr, String>) -> IntResult {
 
     *BITRATE_MANAGER.lock() = BitrateManager::new(settings.video.bitrate.history_size, fps);
 
-    let stream_socket = runtime
-        .block_on(async {
-            tokio::select! {
-                res = StreamSocketBuilder::connect_to_client(
-                    client_ip,
-                    settings.connection.stream_port,
-                    settings.connection.stream_protocol,
-                    settings.connection.server_send_buffer_bytes,
-                    settings.connection.server_recv_buffer_bytes,
-                    settings.connection.packet_size as _,
-                ) => res,
-                _ = time::sleep(Duration::from_secs(1)) => {
-                    fmt_e!("Timeout while setting up streams")
-                }
-            }
-        })
-        .map_err(to_int_e!())?;
-    let stream_socket = Arc::new(stream_socket);
-
-
-    let mut tracking_receiver =
-        runtime.block_on(stream_socket.subscribe_to_stream::<Tracking>(TRACKING));
-    let mut statics_receiver =
-        runtime.block_on(stream_socket.subscribe_to_stream::<ClientStatistics>(STATISTICS));
+    let mut stream_socket = StreamSocketBuilder::connect_to_client(
+        HANDSHAKE_ACTION_TIMEOUT,
+        client_ip,
+        settings.connection.stream_port,
+        settings.connection.stream_protocol,
+        settings.connection.server_send_buffer_bytes,
+        settings.connection.server_recv_buffer_bytes,
+        settings.connection.packet_size as _,
+    )?;
 
     let mut video_sender = stream_socket.request_stream(VIDEO);
+    let game_audio_sender = stream_socket.request_stream(AUDIO);
+    let microphone_receiver = stream_socket.subscribe_to_stream(AUDIO, MAX_UNREAD_PACKETS);
+    let mut tracking_receiver =
+        stream_socket.subscribe_to_stream::<Tracking>(TRACKING, MAX_UNREAD_PACKETS);
     let haptics_sender = stream_socket.request_stream(HAPTICS);
+    let mut statics_receiver =
+        stream_socket.subscribe_to_stream::<ClientStatistics>(STATISTICS, MAX_UNREAD_PACKETS);
 
-    let game_audio_loop: BoxFuture<_> = if let Switch::Enabled(config) = settings.audio.game_audio {
-        let sender = stream_socket.request_stream(AUDIO);
-        Box::pin(async move {
-            loop {
+    // Note: from here on, the function MUST be infallible. Failure to respect this might leave
+    // lingering objects that prevent reconnection.
+    IS_STREAMING.set(true);
+
+    let (video_channel_sender, video_channel_receiver) =
+        std::sync::mpsc::sync_channel(settings.connection.max_queued_server_video_frames);
+    *VIDEO_CHANNEL_SENDER.lock() = Some(video_channel_sender);
+    *HAPTICS_SENDER.lock() = Some(haptics_sender);
+
+    let video_send_thread = thread::spawn(move || {
+        while IS_STREAMING.value() {
+            let VideoPacket { header, payload } =
+                match video_channel_receiver.recv_timeout(STREAMING_RECV_TIMEOUT) {
+                    Ok(packet) => packet,
+                    Err(RecvTimeoutError::Timeout) => continue,
+                    Err(RecvTimeoutError::Disconnected) => return,
+                };
+
+            let mut buffer = video_sender.get_buffer(&header).unwrap();
+            // todo: make encoder write to socket buffers directly to avoid copy
+            buffer
+                .get_range_mut(0, payload.len())
+                .copy_from_slice(&payload);
+            video_sender.send(buffer).ok();
+        }
+    });
+
+    let game_audio_thread = if let Switch::Enabled(config) = settings.audio.game_audio {
+        thread::spawn(move || {
+            while IS_STREAMING.value() {
                 let device = match AudioDevice::new_output(
                     Some(settings.audio.linux_backend),
                     config.device.as_ref(),
                 ) {
                     Ok(data) => data,
                     Err(e) => {
-                        warn!("New audio device failed: {e}");
-                        time::sleep(RETRY_CONNECT_MIN_INTERVAL).await;
+                        warn!("New audio device failed: {e:?}");
+                        thread::sleep(RETRY_CONNECT_MIN_INTERVAL);
                         continue;
                     }
                 };
-                let mute_when_streaming = config.mute_when_streaming;
 
                 #[cfg(windows)]
                 if let Ok(id) = alvr_audio::get_windows_device_id(&device) {
@@ -599,16 +602,19 @@ fn try_connect(mut client_ips: HashMap<IpAddr, String>) -> IntResult {
                     continue;
                 };
 
-                let new_sender = sender.clone();
-                if let Err(e) =
-                    alvr_audio::record_audio_loop(device, 2, mute_when_streaming, new_sender).await
-                {
-                    warn!("Audio task exit with error : {e}")
+                if let Err(e) = alvr_audio::record_audio_blocking(
+                    Arc::clone(&IS_STREAMING),
+                    game_audio_sender.clone(),
+                    &device,
+                    2,
+                    config.mute_when_streaming,
+                ) {
+                    error!("Audio record error: {e:?}");
                 }
 
                 #[cfg(windows)]
-                if let Ok(id) =
-                    alvr_audio::get_windows_device_id(&AudioDevice::new_output(None, None)?)
+                if let Ok(id) = AudioDevice::new_output(None, None)
+                    .and_then(|d| alvr_audio::get_windows_device_id(&d))
                 {
                     unsafe {
                         crate::SetOpenvrProperty(
@@ -623,16 +629,16 @@ fn try_connect(mut client_ips: HashMap<IpAddr, String>) -> IntResult {
             }
         })
     } else {
-        Box::pin(future::pending())
+        thread::spawn(|| ())
     };
-    let microphone_loop: BoxFuture<_> = if let Switch::Enabled(config) = settings.audio.microphone {
+
+    let microphone_thread = if let Switch::Enabled(config) = settings.audio.microphone {
         #[allow(unused_variables)]
         let (sink, source) = AudioDevice::new_virtual_microphone_pair(
             Some(settings.audio.linux_backend),
             config.devices,
         )
-        .map_err(to_int_e!())?;
-        let receiver = runtime.block_on(stream_socket.subscribe_to_stream(AUDIO));
+        .to_con()?;
 
         #[cfg(windows)]
         if let Ok(id) = alvr_audio::get_windows_device_id(&source) {
@@ -647,49 +653,26 @@ fn try_connect(mut client_ips: HashMap<IpAddr, String>) -> IntResult {
             }
         }
 
-        Box::pin(alvr_audio::play_audio_loop(
-            sink,
-            1,
-            streaming_caps.microphone_sample_rate,
-            config.buffering,
-            receiver,
-        ))
+        thread::spawn(move || {
+            alvr_common::show_err(alvr_audio::play_audio_loop(
+                Arc::clone(&IS_STREAMING),
+                sink,
+                1,
+                streaming_caps.microphone_sample_rate,
+                config.buffering,
+                microphone_receiver,
+            ));
+        })
     } else {
-        Box::pin(future::pending())
+        thread::spawn(|| ())
     };
-
-    // Note: here we create CONNECTION_RUNTIME. The rest of the function MUST be infallible, as
-    // CONNECTION_RUNTIME must be destroyed in the thread defined at the end of the function.
-    // Failure to respect this might leave a lingering runtime.
-    *CONNECTION_RUNTIME.write() = Some(runtime);
-
-    let (video_channel_sender, video_channel_receiver) =
-        std::sync::mpsc::sync_channel(settings.connection.max_queued_server_video_frames);
-    *VIDEO_CHANNEL_SENDER.lock() = Some(video_channel_sender);
-    *HAPTICS_SENDER.lock() = Some(haptics_sender);
-
-    let video_send_thread = thread::spawn(move || loop {
-        let VideoPacket { header, payload } =
-            match video_channel_receiver.recv_timeout(Duration::from_millis(500)) {
-                Ok(packet) => packet,
-                Err(RecvTimeoutError::Timeout) => continue,
-                Err(RecvTimeoutError::Disconnected) => return,
-            };
-
-        if let Some(runtime) = &*CONNECTION_RUNTIME.read() {
-            // IMPORTANT: The only error that can happen here is socket closed. For this reason it's
-            // acceptable to call .ok() and ignore the error. The connection would already be
-            // closing so no corruption handling is necessary
-            runtime.block_on(video_sender.send(&header, payload)).ok();
-        }
-    });
 
     let tracking_manager = Arc::new(Mutex::new(TrackingManager::new()));
 
     let tracking_receive_thread = thread::spawn({
         let tracking_manager = Arc::clone(&tracking_manager);
         move || {
-            let face_tracking_sink =
+            let mut face_tracking_sink =
                 settings
                     .headset
                     .face_tracking
@@ -703,23 +686,13 @@ fn try_connect(mut client_ips: HashMap<IpAddr, String>) -> IntResult {
                 track_controllers = config.tracked.into();
             }
 
-            // 每0.5s报告一次位置信息
-            let mut last_report_instant = Instant::now();
-
-            loop {
-                let tracking = if let Some(runtime) = &*CONNECTION_RUNTIME.read() {
-                    let maybe_tracking = runtime.block_on(async {
-                        tokio::select! {
-                            res = tracking_receiver.recv_header_only() => Some(res),
-                            _ = time::sleep(Duration::from_millis(500)) => None,
-                        }
-                    });
-                    match maybe_tracking {
-                        Some(Ok(tracking)) => tracking,
-                        Some(Err(_)) => return,
-                        None => continue,
-                    }
-                } else {
+            while IS_STREAMING.value() {
+                let data = match tracking_receiver.recv(STREAMING_RECV_TIMEOUT) {
+                    Ok(tracking) => tracking,
+                    Err(ConnectionError::TryAgain(_)) => continue,
+                    Err(ConnectionError::Other(_)) => return,
+                };
+                let Ok(tracking) = data.get_header() else {
                     return;
                 };
 
@@ -781,18 +754,7 @@ fn try_connect(mut client_ips: HashMap<IpAddr, String>) -> IntResult {
                     }
                 }
 
-                if last_report_instant + FULL_REPORT_INTERVAL < Instant::now(){
-                    last_report_instant += FULL_REPORT_INTERVAL;
-                    let head_tracking = motions.iter()
-                    .find(|(id, _)| *id == *HEAD_ID)
-                    .map(|(_, m)| *m);
-                    alvr_events::send_event(EventType::MotionStatistics(MotionStatistics{
-                        orientation: head_tracking.unwrap().pose.orientation,
-                        position: head_tracking.unwrap().pose.position
-                    }));
-                }
-
-                if let Some(sink) = &face_tracking_sink {
+                if let Some(sink) = &mut face_tracking_sink {
                     let mut face_data = tracking.face_data;
                     face_data.eye_gazes = local_eye_gazes;
 
@@ -835,53 +797,41 @@ fn try_connect(mut client_ips: HashMap<IpAddr, String>) -> IntResult {
         }
     });
 
-    let statistics_thread = thread::spawn(move || loop {
-        let client_stats = if let Some(runtime) = &*CONNECTION_RUNTIME.read() {
-            let maybe_client_stats = runtime.block_on(async {
-                tokio::select! {
-                    res = statics_receiver.recv_header_only() => Some(res),
-                    _ = time::sleep(Duration::from_millis(500)) => None,
-                }
-            });
-            match maybe_client_stats {
-                Some(Ok(stats)) => stats,
-                Some(Err(_)) => return,
-                None => continue,
+    let statistics_thread = thread::spawn(move || {
+        while IS_STREAMING.value() {
+            let data = match statics_receiver.recv(STREAMING_RECV_TIMEOUT) {
+                Ok(stats) => stats,
+                Err(ConnectionError::TryAgain(_)) => continue,
+                Err(ConnectionError::Other(_)) => return,
+            };
+            let Ok(client_stats) = data.get_header() else {
+                return;
+            };
+
+            if let Some(stats) = &mut *STATISTICS_MANAGER.lock() {
+                let timestamp = client_stats.target_timestamp;
+                let decoder_latency = client_stats.video_decode;
+                let network_latency = stats.report_statistics(client_stats);
+
+                BITRATE_MANAGER.lock().report_frame_latencies(
+                    &SERVER_DATA_MANAGER.read().settings().video.bitrate.mode,
+                    timestamp,
+                    network_latency,
+                    decoder_latency,
+                );
             }
-        } else {
-            return;
-        };
-
-        if let Some(stats) = &mut *STATISTICS_MANAGER.lock() {
-            let timestamp = client_stats.target_timestamp;
-            let decoder_latency = client_stats.video_decode;
-            let network_latency = stats.report_statistics(client_stats);
-
-            BITRATE_MANAGER.lock().report_frame_latencies(
-                &SERVER_DATA_MANAGER.read().settings().video.bitrate.mode,
-                timestamp,
-                network_latency,
-                decoder_latency,
-            );
         }
     });
 
-    let control_sender = Arc::new(TMutex::new(control_sender));
+    let control_sender = Arc::new(Mutex::new(control_sender));
 
     let keepalive_thread = thread::spawn({
         let control_sender = Arc::clone(&control_sender);
         let client_hostname = client_hostname.clone();
-        move || loop {
-            if let Some(runtime) = &*CONNECTION_RUNTIME.read() {
-                let res = runtime.block_on(async {
-                    control_sender
-                        .lock()
-                        .await
-                        .send(&ServerControlPacket::KeepAlive)
-                        .await
-                });
-                if let Err(e) = res {
-                    info!("Client disconnected. Cause: {e}");
+        move || {
+            while IS_STREAMING.value() {
+                if let Err(e) = control_sender.lock().send(&ServerControlPacket::KeepAlive) {
+                    info!("Client disconnected. Cause: {e:?}");
 
                     SERVER_DATA_MANAGER.write().update_client_list(
                         client_hostname,
@@ -889,32 +839,27 @@ fn try_connect(mut client_ips: HashMap<IpAddr, String>) -> IntResult {
                             should_be_removed: false,
                         }),
                     );
-                    DISCONNECT_CLIENT_NOTIFIER.notify_waiters();
+                    if let Some(notifier) = &*DISCONNECT_CLIENT_NOTIFIER.lock() {
+                        notifier.send(ClientDisconnectRequest::Disconnect).ok();
+                    }
 
                     return;
                 }
-            } else {
-                return;
-            }
 
-            thread::sleep(KEEPALIVE_INTERVAL);
+                thread::sleep(KEEPALIVE_INTERVAL);
+            }
         }
     });
 
-    let control_thread = thread::spawn({
+    let control_receive_thread = thread::spawn({
         let control_sender = Arc::clone(&control_sender);
         let client_hostname = client_hostname.clone();
-        move || loop {
-            let packet = if let Some(runtime) = &*CONNECTION_RUNTIME.read() {
-                let maybe_packet = runtime.block_on(async {
-                    tokio::select! {
-                        res = control_receiver.recv() => Some(res),
-                        _ = time::sleep(Duration::from_millis(500)) => None,
-                    }
-                });
-                match maybe_packet {
-                    Some(Ok(packet)) => packet,
-                    Some(Err(e)) => {
+        move || {
+            while IS_STREAMING.value() {
+                let packet = match control_receiver.recv(STREAMING_RECV_TIMEOUT) {
+                    Ok(packet) => packet,
+                    Err(ConnectionError::TryAgain(_)) => continue,
+                    Err(e) => {
                         info!("Client disconnected. Cause: {e}");
 
                         SERVER_DATA_MANAGER.write().update_client_list(
@@ -923,138 +868,159 @@ fn try_connect(mut client_ips: HashMap<IpAddr, String>) -> IntResult {
                                 should_be_removed: false,
                             }),
                         );
-                        DISCONNECT_CLIENT_NOTIFIER.notify_waiters();
+                        if let Some(notifier) = &*DISCONNECT_CLIENT_NOTIFIER.lock() {
+                            notifier.send(ClientDisconnectRequest::Disconnect).ok();
+                        }
 
                         return;
                     }
-                    None => continue,
-                }
-            } else {
-                return;
-            };
+                };
 
-            match packet {
-                ClientControlPacket::PlayspaceSync(packet) => {
-                    if !settings.headset.tracking_ref_only {
-                        let area = packet.unwrap_or(Vec2::new(2.0, 2.0));
-                        unsafe { crate::SetChaperone(area.x, area.y) };
+                match packet {
+                    ClientControlPacket::PlayspaceSync(packet) => {
+                        if !settings.headset.tracking_ref_only {
+                            let area = packet.unwrap_or(Vec2::new(2.0, 2.0));
+                            unsafe { crate::SetChaperone(area.x, area.y) };
 
-                        let data_manager_lock = SERVER_DATA_MANAGER.read();
-                        let config = &data_manager_lock.settings().headset;
-                        tracking_manager.lock().recenter(
-                            config.position_recentering_mode,
-                            config.rotation_recentering_mode,
-                        );
-                    }
-                }
-                ClientControlPacket::RequestIdr => {
-                    let maybe_config = DECODER_CONFIG.lock().clone();
-                    if let (Some(runtime), Some(config)) =
-                        (&*CONNECTION_RUNTIME.read(), maybe_config)
-                    {
-                        runtime
-                            .block_on(async {
-                                control_sender
-                                    .lock()
-                                    .await
-                                    .send(&ServerControlPacket::InitializeDecoder(config))
-                                    .await
-                            })
-                            .ok();
-                    }
-                    unsafe { crate::RequestIDR() }
-                }
-                ClientControlPacket::VideoErrorReport => {
-                    if let Some(stats) = &mut *STATISTICS_MANAGER.lock() {
-                        stats.report_packet_loss();
-                    }
-                    unsafe { crate::VideoErrorReportReceive() };
-                }
-                ClientControlPacket::ViewsConfig(config) => unsafe {
-                    crate::SetViewsConfig(FfiViewsConfig {
-                        fov: [
-                            FfiFov {
-                                left: config.fov[0].left,
-                                right: config.fov[0].right,
-                                up: config.fov[0].up,
-                                down: config.fov[0].down,
-                            },
-                            FfiFov {
-                                left: config.fov[1].left,
-                                right: config.fov[1].right,
-                                up: config.fov[1].up,
-                                down: config.fov[1].down,
-                            },
-                        ],
-                        ipd_m: config.ipd_m,
-                    });
-                },
-                ClientControlPacket::Battery(packet) => unsafe {
-                    crate::SetBattery(packet.device_id, packet.gauge_value, packet.is_plugged);
-
-                    if let Some(stats) = &mut *STATISTICS_MANAGER.lock() {
-                        stats.report_battery(
-                            packet.device_id,
-                            packet.gauge_value,
-                            packet.is_plugged,
-                        );
-                    }
-                },
-                ClientControlPacket::Buttons(entries) => {
-                    {
-                        let data_manager_lock = SERVER_DATA_MANAGER.read();
-                        if data_manager_lock.settings().logging.log_button_presses {
-                            alvr_events::send_event(EventType::Buttons(
-                                entries
-                                    .iter()
-                                    .map(|e| ButtonEvent {
-                                        path: BUTTON_PATH_FROM_ID
-                                            .get(&e.path_id)
-                                            .cloned()
-                                            .unwrap_or_else(|| {
-                                                format!("Unknown (ID: {:#16x})", e.path_id)
-                                            }),
-                                        value: e.value,
-                                    })
-                                    .collect(),
-                            ));
+                            let data_manager_lock = SERVER_DATA_MANAGER.read();
+                            let config = &data_manager_lock.settings().headset;
+                            tracking_manager.lock().recenter(
+                                config.position_recentering_mode,
+                                config.rotation_recentering_mode,
+                            );
                         }
                     }
-
-                    for entry in entries {
-                        let value = match entry.value {
-                            ButtonValue::Binary(value) => FfiButtonValue {
-                                type_: crate::FfiButtonType_BUTTON_TYPE_BINARY,
-                                __bindgen_anon_1: crate::FfiButtonValue__bindgen_ty_1 {
-                                    binary: value.into(),
+                    ClientControlPacket::RequestIdr => {
+                        if let Some(config) = DECODER_CONFIG.lock().clone() {
+                            control_sender
+                                .lock()
+                                .send(&ServerControlPacket::InitializeDecoder(config))
+                                .ok();
+                        }
+                        unsafe { crate::RequestIDR() }
+                    }
+                    ClientControlPacket::VideoErrorReport => {
+                        if let Some(stats) = &mut *STATISTICS_MANAGER.lock() {
+                            stats.report_packet_loss();
+                        }
+                        unsafe { crate::VideoErrorReportReceive() };
+                    }
+                    ClientControlPacket::ViewsConfig(config) => unsafe {
+                        crate::SetViewsConfig(FfiViewsConfig {
+                            fov: [
+                                FfiFov {
+                                    left: config.fov[0].left,
+                                    right: config.fov[0].right,
+                                    up: config.fov[0].up,
+                                    down: config.fov[0].down,
                                 },
-                            },
-
-                            ButtonValue::Scalar(value) => FfiButtonValue {
-                                type_: crate::FfiButtonType_BUTTON_TYPE_SCALAR,
-                                __bindgen_anon_1: crate::FfiButtonValue__bindgen_ty_1 {
-                                    scalar: value,
+                                FfiFov {
+                                    left: config.fov[1].left,
+                                    right: config.fov[1].right,
+                                    up: config.fov[1].up,
+                                    down: config.fov[1].down,
                                 },
-                            },
-                        };
+                            ],
+                            ipd_m: config.ipd_m,
+                        });
+                    },
+                    ClientControlPacket::Battery(packet) => unsafe {
+                        crate::SetBattery(packet.device_id, packet.gauge_value, packet.is_plugged);
 
-                        unsafe { crate::SetButton(entry.path_id, value) };
+                        if let Some(stats) = &mut *STATISTICS_MANAGER.lock() {
+                            stats.report_battery(
+                                packet.device_id,
+                                packet.gauge_value,
+                                packet.is_plugged,
+                            );
+                        }
+                    },
+                    ClientControlPacket::Buttons(entries) => {
+                        {
+                            let data_manager_lock = SERVER_DATA_MANAGER.read();
+                            if data_manager_lock.settings().logging.log_button_presses {
+                                alvr_events::send_event(EventType::Buttons(
+                                    entries
+                                        .iter()
+                                        .map(|e| ButtonEvent {
+                                            path: BUTTON_PATH_FROM_ID
+                                                .get(&e.path_id)
+                                                .cloned()
+                                                .unwrap_or_else(|| {
+                                                    format!("Unknown (ID: {:#16x})", e.path_id)
+                                                }),
+                                            value: e.value,
+                                        })
+                                        .collect(),
+                                ));
+                            }
+                        }
+
+                        for entry in entries {
+                            let value = match entry.value {
+                                ButtonValue::Binary(value) => FfiButtonValue {
+                                    type_: crate::FfiButtonType_BUTTON_TYPE_BINARY,
+                                    __bindgen_anon_1: crate::FfiButtonValue__bindgen_ty_1 {
+                                        binary: value.into(),
+                                    },
+                                },
+
+                                ButtonValue::Scalar(value) => FfiButtonValue {
+                                    type_: crate::FfiButtonType_BUTTON_TYPE_SCALAR,
+                                    __bindgen_anon_1: crate::FfiButtonValue__bindgen_ty_1 {
+                                        scalar: value,
+                                    },
+                                },
+                            };
+
+                            unsafe { crate::SetButton(entry.path_id, value) };
+                        }
+                    }
+                    ClientControlPacket::Log { level, message } => {
+                        info!("Client {client_hostname}: [{level:?}] {message}")
+                    }
+                    _ => (),
+                }
+            }
+        }
+    });
+
+    let stream_receive_thread = thread::spawn({
+        let client_hostname = client_hostname.clone();
+        move || {
+            while IS_STREAMING.value() {
+                match stream_socket.recv() {
+                    Ok(()) => (),
+                    Err(ConnectionError::TryAgain(_)) => continue,
+                    Err(e) => {
+                        info!("Client disconnected. Cause: {e}");
+
+                        SERVER_DATA_MANAGER.write().update_client_list(
+                            client_hostname,
+                            ClientListAction::SetConnectionState(ConnectionState::Disconnecting {
+                                should_be_removed: false,
+                            }),
+                        );
+
+                        if let Some(notifier) = &*DISCONNECT_CLIENT_NOTIFIER.lock() {
+                            notifier.send(ClientDisconnectRequest::Disconnect).ok();
+                        }
+
+                        return;
                     }
                 }
-                ClientControlPacket::Log { level, message } => {
-                    info!("Client {client_hostname}: [{level:?}] {message}")
-                }
-                _ => (),
             }
         }
     });
 
     let lifecycle_check_thread = thread::spawn(|| {
-        while SHOULD_CONNECT_TO_CLIENTS.value() && CONNECTION_RUNTIME.read().is_some() {
-            thread::sleep(Duration::from_millis(500));
+        while IS_STREAMING.value() && SHOULD_CONNECT_TO_CLIENTS.value() {
+            thread::sleep(STREAMING_RECV_TIMEOUT);
         }
 
-        DISCONNECT_CLIENT_NOTIFIER.notify_waiters();
+        if let Some(notifier) = &*DISCONNECT_CLIENT_NOTIFIER.lock() {
+            notifier.send(ClientDisconnectRequest::Disconnect).ok();
+        }
     });
 
     {
@@ -1071,7 +1037,7 @@ fn try_connect(mut client_ips: HashMap<IpAddr, String>) -> IntResult {
         }
     }
 
-    if settings.capture.save_video_stream {
+    if settings.capture.startup_video_recording {
         crate::create_recording_file();
     }
 
@@ -1085,43 +1051,16 @@ fn try_connect(mut client_ips: HashMap<IpAddr, String>) -> IntResult {
     thread::spawn(move || {
         let _connection_drop_guard = _connection_drop_guard;
 
-        let res = CONNECTION_RUNTIME
-            .read()
-            .as_ref()
-            .unwrap()
-            .block_on(async move {
-                tokio::select! {
-                    res = stream_socket.receive_loop() => {
-                        if let Err(e) = res {
-                            info!("Client disconnected. Cause: {e}" );
-                        }
-
-                        Ok(())
-                    },
-
-                    // Spawn new tasks and let the runtime manage threading
-                    res = spawn_cancelable(game_audio_loop) => res,
-                    res = spawn_cancelable(microphone_loop) => res,
-
-                    _ = RESTART_NOTIFIER.notified() => {
-                        control_sender
-                            .lock()
-                            .await
-                            .send(&ServerControlPacket::Restarting)
-                            .await
-                            .ok();
-
-                        Ok(())
-                    }
-                    _ = DISCONNECT_CLIENT_NOTIFIER.notified() => Ok(()),
-                }
-            });
-        if let Err(e) = res {
-            warn!("Connection interrupted: {e:?}");
+        let res = disconnect_receiver.recv();
+        if matches!(res, Ok(ClientDisconnectRequest::ServerRestart)) {
+            control_sender
+                .lock()
+                .send(&ServerControlPacket::Restarting)
+                .ok();
         }
 
         // This requests shutdown from threads
-        *CONNECTION_RUNTIME.write() = None;
+        IS_STREAMING.set(false);
         *VIDEO_CHANNEL_SENDER.lock() = None;
         *HAPTICS_SENDER.lock() = None;
 
@@ -1147,9 +1086,12 @@ fn try_connect(mut client_ips: HashMap<IpAddr, String>) -> IntResult {
 
         // ensure shutdown of threads
         video_send_thread.join().ok();
+        game_audio_thread.join().ok();
+        microphone_thread.join().ok();
         tracking_receive_thread.join().ok();
         statistics_thread.join().ok();
-        control_thread.join().ok();
+        control_receive_thread.join().ok();
+        stream_receive_thread.join().ok();
         keepalive_thread.join().ok();
         lifecycle_check_thread.join().ok();
     });
@@ -1160,12 +1102,29 @@ fn try_connect(mut client_ips: HashMap<IpAddr, String>) -> IntResult {
 pub extern "C" fn send_video(timestamp_ns: u64, buffer_ptr: *mut u8, len: i32, is_idr: bool) {
     // start in the corrupts state, the client didn't receive the initial IDR yet.
     static STREAM_CORRUPTED: AtomicBool = AtomicBool::new(true);
+    static LAST_IDR_INSTANT: Lazy<Mutex<Instant>> = Lazy::new(|| Mutex::new(Instant::now()));
 
     if let Some(sender) = &*VIDEO_CHANNEL_SENDER.lock() {
         let buffer_size = len as usize;
 
         if is_idr {
             STREAM_CORRUPTED.store(false, Ordering::SeqCst);
+        }
+
+        if let Switch::Enabled(config) = &SERVER_DATA_MANAGER
+            .read()
+            .settings()
+            .capture
+            .rolling_video_files
+        {
+            if Instant::now() > *LAST_IDR_INSTANT.lock() + Duration::from_secs(config.duration_s) {
+                unsafe { crate::RequestIDR() };
+
+                if is_idr {
+                    create_recording_file();
+                    *LAST_IDR_INSTANT.lock() = Instant::now();
+                }
+            }
         }
 
         let timestamp = Duration::from_nanos(timestamp_ns);
@@ -1249,13 +1208,9 @@ pub extern "C" fn send_haptics(device_id: u64, duration_s: f32, frequency: f32, 
             .and_then(|c| c.haptics.as_option().cloned())
     };
 
-    if let (Some(config), Some(runtime), Some(sender)) = (
-        haptics_config,
-        &*CONNECTION_RUNTIME.read(),
-        &mut *HAPTICS_SENDER.lock(),
-    ) {
-        runtime
-            .block_on(sender.send(&haptics::map_haptics(&config, haptics), vec![]))
+    if let (Some(config), Some(sender)) = (haptics_config, &mut *HAPTICS_SENDER.lock()) {
+        sender
+            .send_header(&haptics::map_haptics(&config, haptics))
             .ok();
     }
 }
