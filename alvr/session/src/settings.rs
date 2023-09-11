@@ -546,33 +546,16 @@ pub struct AudioConfig {
     pub microphone: Switch<MicrophoneConfig>,
 }
 
-#[derive(SettingsSchema, Serialize, Deserialize, Clone, Debug)]
-pub enum OpenvrPropValue {
-    Bool(bool),
-    Float(f32),
-    Int32(i32),
-    Uint64(u64),
-    Vector3([f32; 3]),
-    Double(f64),
-    String(String),
-}
-
-#[derive(SettingsSchema, Serialize, Deserialize, Clone, Debug)]
-pub struct OpenvrPropEntry {
-    pub key: OpenvrPropertyKey,
-    pub value: OpenvrPropValue,
-}
-
 #[derive(SettingsSchema, Serialize, Deserialize, Clone)]
 pub enum HeadsetEmulationMode {
     #[schema(strings(display_name = "Rift S"))]
     RiftS,
-    Vive,
     #[schema(strings(display_name = "Quest 2"))]
     Quest2,
+    Vive,
     Custom {
         serial_number: String,
-        props: Vec<OpenvrPropEntry>,
+        props: Vec<OpenvrProperty>,
     },
 }
 
@@ -598,16 +581,31 @@ pub struct FaceTrackingConfig {
     pub sink: FaceTrackingSinkConfig,
 }
 
-#[derive(SettingsSchema, Serialize, Deserialize, Clone)]
+#[derive(SettingsSchema, Serialize, Deserialize, Clone, PartialEq, Eq)]
 pub enum ControllersEmulationMode {
     #[schema(strings(display_name = "Rift S Touch"))]
     RiftSTouch,
+    #[schema(strings(display_name = "Quest 2 Touch"))]
+    Quest2Touch,
     #[schema(strings(display_name = "Valve Index"))]
     ValveIndex,
     ViveWand,
-    #[schema(strings(display_name = "Quest 2 Touch"))]
-    Quest2Touch,
     ViveTracker,
+}
+
+#[derive(SettingsSchema, Serialize, Deserialize, Clone, Copy)]
+pub struct HysteresisThreshold {
+    #[schema(gui(slider(min = 0.0, max = 1.0, step = 0.01)))]
+    pub value: f32,
+    #[schema(gui(slider(min = 0.0, max = 1.0, step = 0.01)))]
+    pub deviation: f32,
+}
+
+#[derive(SettingsSchema, Serialize, Deserialize, Clone)]
+pub struct AutomaticButtonMappingConfig {
+    pub click_threshold: HysteresisThreshold,
+    pub touch_threshold: HysteresisThreshold,
+    pub force_threshold: f32,
 }
 
 #[derive(SettingsSchema, Serialize, Deserialize, Clone)]
@@ -637,7 +635,9 @@ pub struct ControllersConfig {
     pub emulation_mode: ControllersEmulationMode,
 
     #[schema(flag = "steamvr-restart")]
-    pub extra_openvr_props: Vec<OpenvrPropEntry>,
+    pub extra_openvr_props: Vec<OpenvrProperty>,
+
+    pub button_mapping_config: AutomaticButtonMappingConfig,
 
     #[schema(strings(
         display_name = "Prediction",
@@ -676,14 +676,6 @@ Currently this cannot be reliably estimated automatically. The correct value sho
     #[schema(gui(slider(min = -180.0, max = 180.0, step = 1.0)), suffix = "°")]
     pub left_hand_tracking_rotation_offset: [f32; 3],
 
-    #[schema(flag = "steamvr-restart")]
-    #[schema(gui(slider(min = 0.01, max = 1.0, step = 0.01)))]
-    pub trigger_threshold_override: Switch<f32>,
-
-    #[schema(flag = "steamvr-restart")]
-    #[schema(gui(slider(min = 0.01, max = 1.0, step = 0.01)))]
-    pub grip_threshold_override: Switch<f32>,
-
     #[schema(flag = "real-time")]
     pub haptics: Switch<HapticsConfig>,
 }
@@ -711,7 +703,7 @@ pub struct HeadsetConfig {
     pub emulation_mode: HeadsetEmulationMode,
 
     #[schema(flag = "steamvr-restart")]
-    pub extra_openvr_props: Vec<OpenvrPropEntry>,
+    pub extra_openvr_props: Vec<OpenvrProperty>,
 
     #[schema(flag = "steamvr-restart")]
     pub tracking_ref_only: bool,
@@ -828,6 +820,12 @@ For now works only on Windows+Nvidia"#
 }
 
 #[derive(SettingsSchema, Serialize, Deserialize, Clone)]
+pub struct RawEventsConfig {
+    #[schema(flag = "real-time")]
+    pub hide_spammy_events: bool,
+}
+
+#[derive(SettingsSchema, Serialize, Deserialize, Clone)]
 pub struct LoggingConfig {
     pub client_log_report_level: Switch<LogSeverity>,
     #[schema(strings(help = "Write logs into the session_log.txt file."))]
@@ -841,7 +839,7 @@ pub struct LoggingConfig {
     #[schema(flag = "real-time")]
     pub notification_level: LogSeverity,
     #[schema(flag = "real-time")]
-    pub show_raw_events: bool,
+    pub show_raw_events: Switch<RawEventsConfig>,
     #[schema(strings(help = "This applies only to certain error or warning messages."))]
     #[schema(flag = "steamvr-restart")]
     pub prefer_backtrace: bool,
@@ -926,22 +924,7 @@ pub fn session_settings_default() -> SettingsDefault {
         variant: CustomAudioDeviceConfigDefaultVariant::NameSubstring,
     };
     let default_custom_openvr_props = VectorDefault {
-        element: OpenvrPropEntryDefault {
-            gui_collapsed: false,
-            key: OpenvrPropertyKeyDefault {
-                variant: OpenvrPropertyKeyDefaultVariant::TrackingSystemName,
-            },
-            value: OpenvrPropValueDefault {
-                Bool: false,
-                Float: 0.0,
-                Int32: 0,
-                Uint64: 0,
-                Vector3: [0.0, 0.0, 0.0],
-                Double: 0.0,
-                String: "".into(),
-                variant: OpenvrPropValueDefaultVariant::String,
-            },
-        },
+        element: OPENVR_PROPS_DEFAULT.clone(),
         content: vec![],
     };
     let socket_buffer = SocketBufferSizeDefault {
@@ -1222,6 +1205,20 @@ pub fn session_settings_default() -> SettingsDefault {
                     },
                     tracked: true,
                     extra_openvr_props: default_custom_openvr_props,
+                    button_mapping_config: AutomaticButtonMappingConfigDefault {
+                        gui_collapsed: true,
+                        click_threshold: HysteresisThresholdDefault {
+                            gui_collapsed: false,
+                            value: 0.5,
+                            deviation: 0.05,
+                        },
+                        touch_threshold: HysteresisThresholdDefault {
+                            gui_collapsed: false,
+                            value: 0.1,
+                            deviation: 0.05,
+                        },
+                        force_threshold: 0.8,
+                    },
                     steamvr_pipeline_frames: 3.0,
                     linear_velocity_cutoff: 0.05,
                     angular_velocity_cutoff: 10.0,
@@ -1229,14 +1226,6 @@ pub fn session_settings_default() -> SettingsDefault {
                     left_controller_rotation_offset: [-20.0, 0.0, 0.0],
                     left_hand_tracking_position_offset: [0.04, -0.02, -0.13],
                     left_hand_tracking_rotation_offset: [0.0, -45.0, -90.0],
-                    trigger_threshold_override: SwitchDefault {
-                        enabled: false,
-                        content: 0.1,
-                    },
-                    grip_threshold_override: SwitchDefault {
-                        enabled: false,
-                        content: 0.1,
-                    },
                     haptics: SwitchDefault {
                         enabled: true,
                         content: HapticsConfigDefault {
@@ -1305,7 +1294,13 @@ pub fn session_settings_default() -> SettingsDefault {
                     LogSeverityDefaultVariant::Warning
                 },
             },
-            show_raw_events: false,
+            show_raw_events: SwitchDefault {
+                enabled: false,
+                content: RawEventsConfigDefault {
+                    gui_collapsed: true,
+                    hide_spammy_events: false,
+                },
+            },
             prefer_backtrace: false,
         },
         steamvr_launcher: SteamvrLauncherDefault {

@@ -1,14 +1,13 @@
 use crate::{
     bitrate::BitrateManager,
-    buttons::BUTTON_PATH_FROM_ID,
-    create_recording_file,
     face_tracking::FaceTrackingSink,
     haptics,
+    input_mapping::ButtonMappingManager,
     sockets::WelcomeSocket,
     statistics::StatisticsManager,
     tracking::{self, TrackingManager},
-    FfiButtonValue, FfiFov, FfiViewsConfig, VideoPacket, BITRATE_MANAGER, DECODER_CONFIG,
-    SERVER_DATA_MANAGER, STATISTICS_MANAGER, VIDEO_MIRROR_SENDER, VIDEO_RECORDING_FILE,
+    FfiFov, FfiViewsConfig, VideoPacket, BITRATE_MANAGER, DECODER_CONFIG, SERVER_DATA_MANAGER,
+    STATISTICS_MANAGER, VIDEO_MIRROR_SENDER, VIDEO_RECORDING_FILE,
 };
 use alvr_audio::AudioDevice;
 use alvr_common::{
@@ -18,19 +17,21 @@ use alvr_common::{
     once_cell::sync::Lazy,
     parking_lot::Mutex,
     settings_schema::Switch,
-    warn, AnyhowToCon, ConResult, ConnectionError, LazyMutOpt, RelaxedAtomic, ToCon,
-    DEVICE_ID_TO_PATH, HEAD_ID, LEFT_HAND_ID, RIGHT_HAND_ID,
+    warn, AnyhowToCon, ConResult, ConnectionError, LazyMutOpt, RelaxedAtomic, ToCon, BUTTON_INFO,
+    CONTROLLER_PROFILE_INFO, DEVICE_ID_TO_PATH, HEAD_ID, LEFT_HAND_ID,
+    QUEST_CONTROLLER_PROFILE_PATH, RIGHT_HAND_ID,
 };
 
 use alvr_events::{ButtonEvent, EventType, HapticsEvent, TrackingEvent, MotionStatistics, NetworkStatistics};
 use alvr_packets::{
-    ButtonValue, ClientConnectionResult, ClientControlPacket, ClientListAction, ClientStatistics,
-    Haptics, ServerControlPacket, StreamConfigPacket, Tracking, VideoPacketHeader, AUDIO, HAPTICS,
+    ClientConnectionResult, ClientControlPacket, ClientListAction, ClientStatistics, Haptics,
+    ServerControlPacket, StreamConfigPacket, Tracking, VideoPacketHeader, AUDIO, HAPTICS,
     STATISTICS, TRACKING, VIDEO,
 };
 use alvr_session::{CodecType, ConnectionState, ControllersEmulationMode, FrameSize, OpenvrConfig};
 use alvr_sockets::{
     PeerType, ProtoControlSocket, StreamSender, StreamSocketBuilder, KEEPALIVE_INTERVAL,
+    KEEPALIVE_TIMEOUT,
 };
 use std::{
     collections::HashMap,
@@ -78,32 +79,13 @@ pub fn contruct_openvr_config() -> OpenvrConfig {
     let old_config = data_manager_lock.session().openvr_config.clone();
     let settings = data_manager_lock.settings().clone();
 
-    let mut controllers_mode_idx = 0;
-    let mut override_trigger_threshold = false;
-    let mut trigger_threshold = 0.0;
-    let mut override_grip_threshold = false;
-    let mut grip_threshold = 0.0;
+    let mut controller_is_tracker = false;
+    let mut _controller_profile = 0;
     let controllers_enabled = if let Switch::Enabled(config) = settings.headset.controllers {
-        controllers_mode_idx = match config.emulation_mode {
-            ControllersEmulationMode::RiftSTouch => 1,
-            ControllersEmulationMode::ValveIndex => 3,
-            ControllersEmulationMode::ViveWand => 5,
-            ControllersEmulationMode::Quest2Touch => 7,
-            ControllersEmulationMode::ViveTracker => 9,
-        };
-        override_trigger_threshold =
-            if let Switch::Enabled(value) = config.trigger_threshold_override {
-                trigger_threshold = value;
-                true
-            } else {
-                false
-            };
-        override_grip_threshold = if let Switch::Enabled(value) = config.grip_threshold_override {
-            grip_threshold = value;
-            true
-        } else {
-            false
-        };
+        controller_is_tracker =
+            matches!(config.emulation_mode, ControllersEmulationMode::ViveTracker);
+        _controller_profile = config.emulation_mode as i32;
+
         true
     } else {
         false
@@ -171,11 +153,7 @@ pub fn contruct_openvr_config() -> OpenvrConfig {
             .force_software_encoding,
         sw_thread_count: settings.video.encoder_config.software.thread_count,
         controllers_enabled,
-        controllers_mode_idx,
-        override_trigger_threshold,
-        trigger_threshold,
-        override_grip_threshold,
-        grip_threshold,
+        controller_is_tracker,
         enable_foveated_rendering,
         foveation_center_size_x,
         foveation_center_size_y,
@@ -209,6 +187,7 @@ pub fn contruct_openvr_config() -> OpenvrConfig {
         nvenc_enable_weighted_prediction: nvenc_overrides.enable_weighted_prediction,
         capture_frame_dir: settings.capture.capture_frame_dir,
         amd_bitrate_corruption_fix: settings.video.bitrate.image_corruption_fix,
+        _controller_profile,
         ..old_config
     }
 }
@@ -593,8 +572,7 @@ fn try_connect(mut client_ips: HashMap<IpAddr, String>) -> ConResult {
                         crate::SetOpenvrProperty(
                             *alvr_common::HEAD_ID,
                             crate::openvr_props::to_ffi_openvr_prop(
-                                alvr_session::OpenvrPropertyKey::AudioDefaultPlaybackDeviceId,
-                                alvr_session::OpenvrPropValue::String(id),
+                                alvr_session::OpenvrProperty::AudioDefaultPlaybackDeviceId(id),
                             ),
                         )
                     }
@@ -620,8 +598,7 @@ fn try_connect(mut client_ips: HashMap<IpAddr, String>) -> ConResult {
                         crate::SetOpenvrProperty(
                             *alvr_common::HEAD_ID,
                             crate::openvr_props::to_ffi_openvr_prop(
-                                alvr_session::OpenvrPropertyKey::AudioDefaultPlaybackDeviceId,
-                                alvr_session::OpenvrPropValue::String(id),
+                                alvr_session::OpenvrProperty::AudioDefaultPlaybackDeviceId(id),
                             ),
                         )
                     }
@@ -646,8 +623,7 @@ fn try_connect(mut client_ips: HashMap<IpAddr, String>) -> ConResult {
                 crate::SetOpenvrProperty(
                     *alvr_common::HEAD_ID,
                     crate::openvr_props::to_ffi_openvr_prop(
-                        alvr_session::OpenvrPropertyKey::AudioDefaultRecordingDeviceId,
-                        alvr_session::OpenvrPropValue::String(id),
+                        alvr_session::OpenvrProperty::AudioDefaultRecordingDeviceId(id),
                     ),
                 )
             }
@@ -852,27 +828,39 @@ fn try_connect(mut client_ips: HashMap<IpAddr, String>) -> ConResult {
     });
 
     let control_receive_thread = thread::spawn({
+        let mut controller_button_mapping_manager = if let Switch::Enabled(config) =
+            &SERVER_DATA_MANAGER.read().settings().headset.controllers
+        {
+            Some(ButtonMappingManager::new_automatic(
+                &CONTROLLER_PROFILE_INFO
+                    .get(&alvr_common::hash_string(QUEST_CONTROLLER_PROFILE_PATH))
+                    .unwrap()
+                    .button_set,
+                &config.button_mapping_config,
+            ))
+        } else {
+            None
+        };
+        // todo: gestures_button_mapping_manager...
+
         let control_sender = Arc::clone(&control_sender);
         let client_hostname = client_hostname.clone();
         move || {
+            let mut disconnection_deadline = Instant::now() + KEEPALIVE_TIMEOUT;
             while IS_STREAMING.value() {
                 let packet = match control_receiver.recv(STREAMING_RECV_TIMEOUT) {
                     Ok(packet) => packet,
-                    Err(ConnectionError::TryAgain(_)) => continue,
+                    Err(ConnectionError::TryAgain(_)) => {
+                        if Instant::now() > disconnection_deadline {
+                            info!("Client disconnected. Timeout");
+                            break;
+                        } else {
+                            continue;
+                        }
+                    }
                     Err(e) => {
                         info!("Client disconnected. Cause: {e}");
-
-                        SERVER_DATA_MANAGER.write().update_client_list(
-                            client_hostname,
-                            ClientListAction::SetConnectionState(ConnectionState::Disconnecting {
-                                should_be_removed: false,
-                            }),
-                        );
-                        if let Some(notifier) = &*DISCONNECT_CLIENT_NOTIFIER.lock() {
-                            notifier.send(ClientDisconnectRequest::Disconnect).ok();
-                        }
-
-                        return;
+                        break;
                     }
                 };
 
@@ -900,6 +888,7 @@ fn try_connect(mut client_ips: HashMap<IpAddr, String>) -> ConResult {
                         unsafe { crate::RequestIDR() }
                     }
                     ClientControlPacket::VideoErrorReport => {
+                        // legacy endpoint. todo: remove
                         if let Some(stats) = &mut *STATISTICS_MANAGER.lock() {
                             stats.report_packet_loss();
                         }
@@ -943,9 +932,9 @@ fn try_connect(mut client_ips: HashMap<IpAddr, String>) -> ConResult {
                                     entries
                                         .iter()
                                         .map(|e| ButtonEvent {
-                                            path: BUTTON_PATH_FROM_ID
+                                            path: BUTTON_INFO
                                                 .get(&e.path_id)
-                                                .cloned()
+                                                .map(|info| info.path.to_owned())
                                                 .unwrap_or_else(|| {
                                                     format!("Unknown (ID: {:#16x})", e.path_id)
                                                 }),
@@ -956,31 +945,46 @@ fn try_connect(mut client_ips: HashMap<IpAddr, String>) -> ConResult {
                             }
                         }
 
-                        for entry in entries {
-                            let value = match entry.value {
-                                ButtonValue::Binary(value) => FfiButtonValue {
-                                    type_: crate::FfiButtonType_BUTTON_TYPE_BINARY,
-                                    __bindgen_anon_1: crate::FfiButtonValue__bindgen_ty_1 {
-                                        binary: value.into(),
-                                    },
-                                },
-
-                                ButtonValue::Scalar(value) => FfiButtonValue {
-                                    type_: crate::FfiButtonType_BUTTON_TYPE_SCALAR,
-                                    __bindgen_anon_1: crate::FfiButtonValue__bindgen_ty_1 {
-                                        scalar: value,
-                                    },
-                                },
+                        if let Some(manager) = &mut controller_button_mapping_manager {
+                            for entry in entries {
+                                manager.report_button(entry.path_id, entry.value);
+                            }
+                        };
+                    }
+                    ClientControlPacket::ActiveInteractionProfile {
+                        device_id: _,
+                        profile_id,
+                    } => {
+                        controller_button_mapping_manager =
+                            if let (Switch::Enabled(config), Some(profile_info)) = (
+                                &SERVER_DATA_MANAGER.read().settings().headset.controllers,
+                                CONTROLLER_PROFILE_INFO.get(&profile_id),
+                            ) {
+                                Some(ButtonMappingManager::new_automatic(
+                                    &profile_info.button_set,
+                                    &config.button_mapping_config,
+                                ))
+                            } else {
+                                None
                             };
-
-                            unsafe { crate::SetButton(entry.path_id, value) };
-                        }
                     }
                     ClientControlPacket::Log { level, message } => {
                         info!("Client {client_hostname}: [{level:?}] {message}")
                     }
                     _ => (),
                 }
+
+                disconnection_deadline = Instant::now() + KEEPALIVE_TIMEOUT;
+            }
+
+            SERVER_DATA_MANAGER.write().update_client_list(
+                client_hostname,
+                ClientListAction::SetConnectionState(ConnectionState::Disconnecting {
+                    should_be_removed: false,
+                }),
+            );
+            if let Some(notifier) = &*DISCONNECT_CLIENT_NOTIFIER.lock() {
+                notifier.send(ClientDisconnectRequest::Disconnect).ok();
             }
         }
     });
@@ -1121,7 +1125,7 @@ pub extern "C" fn send_video(timestamp_ns: u64, buffer_ptr: *mut u8, len: i32, i
                 unsafe { crate::RequestIDR() };
 
                 if is_idr {
-                    create_recording_file();
+                    crate::create_recording_file();
                     *LAST_IDR_INSTANT.lock() = Instant::now();
                 }
             }

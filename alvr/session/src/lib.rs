@@ -60,12 +60,8 @@ pub struct OpenvrConfig {
     pub entropy_coding: u32,
     pub force_sw_encoding: bool,
     pub sw_thread_count: u32,
-    pub controllers_mode_idx: i32,
+    pub controller_is_tracker: bool,
     pub controllers_enabled: bool,
-    pub override_trigger_threshold: bool,
-    pub trigger_threshold: f32,
-    pub override_grip_threshold: bool,
-    pub grip_threshold: f32,
     pub enable_foveated_rendering: bool,
     pub foveation_center_size_x: f32,
     pub foveation_center_size_y: f32,
@@ -100,6 +96,10 @@ pub struct OpenvrConfig {
     pub nvenc_enable_weighted_prediction: bool,
     pub capture_frame_dir: String,
     pub amd_bitrate_corruption_fix: bool,
+
+    // these settings are not used on the C++ side, but we need them to correctly trigger a SteamVR
+    // restart
+    pub _controller_profile: i32,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
@@ -300,7 +300,7 @@ fn extrapolate_session_settings_from_session_settings(
                                 .iter()
                                 .any(|named_entry| variant_str == named_entry.name)
                         })
-                        .is_some()
+                        .unwrap_or(false)
                 })
                 .unwrap_or_else(|| old_session_settings["variant"].clone());
 
