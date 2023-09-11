@@ -11,9 +11,10 @@ use std::{
 
 const UPDATE_INTERVAL: Duration = Duration::from_secs(1);
 
+
 pub struct BitrateManager {
     nominal_frame_interval: Duration,                        //新增：帧率
-    max_history_size: usize,                                 //新增：历史最大值
+    frame_interval_average: SlidingWindowAverage<Duration>,
     // note: why packet_sizes_bits_history is a queue and not a sliding average? Because some
     // network samples will be dropped but not any packet size sample
     packet_sizes_bits_history: VecDeque<(Duration, usize)>,  //新增：历史包大小记录
