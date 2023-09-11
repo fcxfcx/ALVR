@@ -51,7 +51,7 @@ use std::{
 const RETRY_CONNECT_MIN_INTERVAL: Duration = Duration::from_secs(1);
 const HANDSHAKE_ACTION_TIMEOUT: Duration = Duration::from_secs(2);
 const STREAMING_RECV_TIMEOUT: Duration = Duration::from_millis(500);
-
+const FULL_REPORT_INTERVAL: Duration = Duration::from_millis(500);  // 每隔几秒钟输出一次日志
 const MAX_UNREAD_PACKETS: usize = 10; // Applies per stream
 
 pub static SHOULD_CONNECT_TO_CLIENTS: Lazy<Arc<RelaxedAtomic>> =
@@ -662,6 +662,8 @@ fn try_connect(mut client_ips: HashMap<IpAddr, String>) -> ConResult {
                 track_controllers = config.tracked.into();
             }
 
+            let mut last_report_instant = Instant::now();
+
             while IS_STREAMING.value() {
                 let data = match tracking_receiver.recv(STREAMING_RECV_TIMEOUT) {
                     Ok(tracking) => tracking,
@@ -730,6 +732,17 @@ fn try_connect(mut client_ips: HashMap<IpAddr, String>) -> ConResult {
                     }
                 }
 
+                if last_report_instant + FULL_REPORT_INTERVAL < Instant::now(){
+                    let head_tracking = motions.iter()
+                    .find(|(id, _)| *id == *HEAD_ID)
+                    .map(|(_, m)| *m);
+                    alvr_events::send_event(EventType::MotionStatistics(MotionStatistics{
+                        orientation: head_tracking.unwrap().pose.orientation,
+                        position: head_tracking.unwrap().pose.position
+                    }));
+                    last_report_instant =  Instant::now();
+                }
+
                 if let Some(sink) = &mut face_tracking_sink {
                     let mut face_data = tracking.face_data;
                     face_data.eye_gazes = local_eye_gazes;
@@ -774,6 +787,7 @@ fn try_connect(mut client_ips: HashMap<IpAddr, String>) -> ConResult {
     });
 
     let statistics_thread = thread::spawn(move || {
+        let mut last_report_instant = Instant::now();
         while IS_STREAMING.value() {
             let data = match statics_receiver.recv(STREAMING_RECV_TIMEOUT) {
                 Ok(stats) => stats,
@@ -795,6 +809,17 @@ fn try_connect(mut client_ips: HashMap<IpAddr, String>) -> ConResult {
                     network_latency,
                     decoder_latency,
                 );
+            }
+
+            if last_report_instant + FULL_REPORT_INTERVAL < Instant::now(){
+                let mut bitrate_lock = BITRATE_MANAGER.lock();
+                alvr_events::send_event(EventType::NetworkStatistics(NetworkStatistics{
+                    video_mbits_per_sec: bitrate_lock.get_bitrate_last_interval() / 1e6,
+                    data_bits : bitrate_lock.get_data_last_interval()
+                }));
+                bitrate_lock.clear_last_interval();
+                drop(bitrate_lock);
+                last_report_instant =  Instant::now();
             }
         }
     });
