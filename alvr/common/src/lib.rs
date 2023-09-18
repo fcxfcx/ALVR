@@ -19,7 +19,7 @@ pub use settings_schema;
 pub use average::*;
 pub use connection_result::*;
 pub use inputs::*;
-pub use log::{debug, error, info, warn};
+pub use log::{debug, error, info, warn, trace};
 pub use logging::*;
 pub use primitives::*;
 pub use version::*;

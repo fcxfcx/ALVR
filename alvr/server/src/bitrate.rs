@@ -266,6 +266,9 @@ impl BitrateManager {
     }
 
     pub fn get_bitrate_last_interval(& self)-> f32{
+        if self.bitrate_last_interval.len() == 0{
+            return 0.0
+        }
         return self.bitrate_last_interval.iter().sum::<f32>() / self.bitrate_last_interval.len() as f32
     }
 

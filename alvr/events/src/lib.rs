@@ -1,4 +1,4 @@
-use alvr_common::{info, DeviceMotion, LogEntry, Pose, glam::{Quat, Vec3}};
+use alvr_common::{info, trace, DeviceMotion, LogEntry, Pose, glam::{Quat, Vec3}};
 use alvr_packets::{AudioDevicesList, ButtonValue};
 use alvr_session::SessionConfig;
 use serde::{Deserialize, Serialize};
@@ -122,16 +122,16 @@ pub fn send_event(event_type: EventType) {
     // only send the data we want to the log file
     match event_type {
         EventType::NetworkStatistics(_) => {
-            info!("{}", serde_json::to_string(&event_type).unwrap());
+            trace!("{}", serde_json::to_string(&event_type).unwrap());
         }
-        // EventType::BitrateSelection(_) => {
-        //     info!("{}", serde_json::to_string(&event_type).unwrap());
-        // }
+        EventType::BitrateSelection(_) => {
+            trace!("{}", serde_json::to_string(&event_type).unwrap());
+        }
         EventType::MotionStatistics(_) => {
-            info!("{}", serde_json::to_string(&event_type).unwrap());
+            trace!("{}", serde_json::to_string(&event_type).unwrap());
         }
         _ => {
-            return;
+            info!("{}", serde_json::to_string(&event_type).unwrap());
         }
     }
 }

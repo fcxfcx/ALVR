@@ -733,6 +733,7 @@ fn try_connect(mut client_ips: HashMap<IpAddr, String>) -> ConResult {
                 }
 
                 if last_report_instant + FULL_REPORT_INTERVAL < Instant::now(){
+                    last_report_instant += FULL_REPORT_INTERVAL;
                     let head_tracking = motions.iter()
                     .find(|(id, _)| *id == *HEAD_ID)
                     .map(|(_, m)| *m);
@@ -740,7 +741,7 @@ fn try_connect(mut client_ips: HashMap<IpAddr, String>) -> ConResult {
                         orientation: head_tracking.unwrap().pose.orientation,
                         position: head_tracking.unwrap().pose.position
                     }));
-                    last_report_instant =  Instant::now();
+                    
                 }
 
                 if let Some(sink) = &mut face_tracking_sink {
@@ -812,6 +813,7 @@ fn try_connect(mut client_ips: HashMap<IpAddr, String>) -> ConResult {
             }
 
             if last_report_instant + FULL_REPORT_INTERVAL < Instant::now(){
+                last_report_instant += FULL_REPORT_INTERVAL;
                 let mut bitrate_lock = BITRATE_MANAGER.lock();
                 alvr_events::send_event(EventType::NetworkStatistics(NetworkStatistics{
                     video_mbits_per_sec: bitrate_lock.get_bitrate_last_interval() / 1e6,
@@ -819,7 +821,7 @@ fn try_connect(mut client_ips: HashMap<IpAddr, String>) -> ConResult {
                 }));
                 bitrate_lock.clear_last_interval();
                 drop(bitrate_lock);
-                last_report_instant =  Instant::now();
+                
             }
         }
     });

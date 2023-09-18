@@ -123,7 +123,7 @@ pub struct ClientConnectionConfig {
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct SessionConfig {
     pub server_version: Version,               // 连接会话描述 -- 服务器版本
-    pub drivers_backup: Option<DriversBackup>, // 连接会话描述 -- 是否显示安装向导
+    pub drivers_backup: Option<DriversBackup>, // 连接会话描述 -- 驱动的备份
     pub openvr_config: OpenvrConfig,           // 连接会话描述 -- OpenVR配置
     // The hashmap key is the hostname
     pub client_connections: HashMap<String, ClientConnectionConfig>, // 连接会话描述 -- 客户端连接列表
