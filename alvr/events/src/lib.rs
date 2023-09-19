@@ -122,13 +122,13 @@ pub fn send_event(event_type: EventType) {
     // only send the data we want to the log file
     match event_type {
         EventType::NetworkStatistics(_) => {
-            trace!("{}", serde_json::to_string(&event_type).unwrap());
+            trace!(target: "alvr_log_event", "{}", serde_json::to_string(&event_type).unwrap());
         }
         EventType::BitrateSelection(_) => {
-            trace!("{}", serde_json::to_string(&event_type).unwrap());
+            trace!(target: "alvr_log_event","{}", serde_json::to_string(&event_type).unwrap());
         }
         EventType::MotionStatistics(_) => {
-            trace!("{}", serde_json::to_string(&event_type).unwrap());
+            trace!(target: "alvr_log_event","{}", serde_json::to_string(&event_type).unwrap());
         }
         _ => {
             info!("{}", serde_json::to_string(&event_type).unwrap());

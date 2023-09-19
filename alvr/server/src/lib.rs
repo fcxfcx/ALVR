@@ -30,7 +30,7 @@ use alvr_common::{
     parking_lot::{Mutex, RwLock},
     LazyMutOpt,
 };
-use alvr_events::{BitrateSelection, EventType};
+use alvr_events::EventType;
 use alvr_filesystem::{self as afs, Layout};
 use alvr_packets::{ClientListAction, DecoderInitializationConfig, VideoPacketHeader};
 use alvr_server_io::ServerDataManager;
@@ -407,9 +407,9 @@ pub unsafe extern "C" fn HmdDriverFactory(
             }
         }
 
-        alvr_events::send_event(EventType::BitrateSelection(BitrateSelection {
-            bitrate_bps: params.bitrate_bps,
-        }));
+        // alvr_events::send_event(EventType::BitrateSelection(BitrateSelection {
+        //     bitrate_bps: params.bitrate_bps,
+        // }));
         params
     }
 

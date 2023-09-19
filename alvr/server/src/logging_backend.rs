@@ -33,15 +33,16 @@ pub fn init_logging(events_sender: Sender<Event>) {
 
     if SERVER_DATA_MANAGER.read().settings().logging.log_to_disk {
         // only print target statistics to the log file
-        log_dispatch = log_dispatch
-            .level_for("alvr_events", LevelFilter::Trace)
+        log_dispatch = log_dispatch    
             .chain(
+                Dispatch::new().chain(
                 fs::OpenOptions::new()
                     .write(true)
                     .create(true)
                     .truncate(true)
                     .open(FILESYSTEM_LAYOUT.session_log())
                     .unwrap(),
+                ).filter(|metadata| {return metadata.target() == "alvr_log_event"})
             );
     } else {
         // this sink is required to make sure all log gets processed and forwarded to the websocket
