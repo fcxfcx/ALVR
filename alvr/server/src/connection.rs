@@ -22,7 +22,7 @@ use alvr_common::{
     QUEST_CONTROLLER_PROFILE_PATH, RIGHT_HAND_ID,
 };
 
-use alvr_events::{ButtonEvent, EventType, HapticsEvent, TrackingEvent, MotionStatistics, NetworkStatistics};
+use alvr_events::{ButtonEvent, EventType, HapticsEvent, TrackingEvent, MotionStatistics, NetworkStatistics, VideoSettinngInfo};
 use alvr_packets::{
     ClientConnectionResult, ClientControlPacket, ClientListAction, ClientStatistics, Haptics,
     ServerControlPacket, StreamConfigPacket, Tracking, VideoPacketHeader, AUDIO, HAPTICS,
@@ -405,6 +405,7 @@ fn try_connect(mut client_ips: HashMap<IpAddr, String>) -> ConResult {
         streaming_caps.default_view_resolution,
     );
 
+
     let fps = {
         let mut best_match = 0_f32;
         let mut min_diff = f32::MAX;
@@ -424,6 +425,14 @@ fn try_connect(mut client_ips: HashMap<IpAddr, String>) -> ConResult {
     {
         warn!("Chosen refresh rate not supported. Using {fps}Hz");
     }
+
+    // 发送分辨率的真实处理信息
+    alvr_events::send_event(EventType::VideoSettinngInfo(VideoSettinngInfo{
+        stream_view_resolution: stream_view_resolution,
+        target_view_resolution: target_view_resolution,
+        fps: fps
+    }));
+    
 
     let game_audio_sample_rate =
         if let Switch::Enabled(game_audio_config) = &settings.audio.game_audio {
@@ -737,9 +746,24 @@ fn try_connect(mut client_ips: HashMap<IpAddr, String>) -> ConResult {
                     let head_tracking = motions.iter()
                     .find(|(id, _)| *id == *HEAD_ID)
                     .map(|(_, m)| *m);
+                    let controller_motions =  [
+                    motions
+                        .iter()
+                        .find(|(id, _)| *id == *LEFT_HAND_ID)
+                        .map(|(_, m)| *m),
+                    motions
+                        .iter()
+                        .find(|(id, _)| *id == *RIGHT_HAND_ID)
+                        .map(|(_, m)| *m),
+                    ];
+
                     alvr_events::send_event(EventType::MotionStatistics(MotionStatistics{
-                        orientation: head_tracking.unwrap().pose.orientation,
-                        position: head_tracking.unwrap().pose.position
+                        head_orientation: head_tracking.unwrap().pose.orientation,
+                        head_position: head_tracking.unwrap().pose.position,
+                        left_orientation: controller_motions[0].unwrap_or_default().pose.orientation,
+                        left_position: controller_motions[0].unwrap_or_default().pose.position,
+                        right_orientation: controller_motions[1].unwrap_or_default().pose.orientation,
+                        right_position: controller_motions[1].unwrap_or_default().pose.position,
                     }));
                     
                 }

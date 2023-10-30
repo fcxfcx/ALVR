@@ -115,7 +115,7 @@ pub fn create_recording_file() {
     };
 
     let path = FILESYSTEM_LAYOUT.log_dir.join(format!(
-        "recording.{}.{ext}",
+        "video/recording.{}.{ext}",
         chrono::Local::now().format("%F.%H-%M-%S")
     ));
 

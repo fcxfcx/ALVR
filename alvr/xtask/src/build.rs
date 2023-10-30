@@ -68,6 +68,7 @@ pub fn build_streamer(
     sh.create_dir(&build_layout.openvr_driver_lib_dir())
         .unwrap();
     sh.create_dir(&build_layout.executables_dir).unwrap();
+    sh.create_dir(&build_layout.executables_dir.join("video")).unwrap();
 
     if let Some(config) = maybe_config {
         fs::write(build_layout.session(), config).ok();

@@ -1,4 +1,4 @@
-use alvr_common::{info, trace, DeviceMotion, LogEntry, Pose, glam::{Quat, Vec3}};
+use alvr_common::{info, trace, DeviceMotion, LogEntry, Pose, glam::{Quat, Vec3, UVec2}};
 use alvr_packets::{AudioDevicesList, ButtonValue};
 use alvr_session::SessionConfig;
 use serde::{Deserialize, Serialize};
@@ -48,8 +48,19 @@ pub struct BitrateSelection {
 
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
 pub struct MotionStatistics{
-    pub orientation: Quat,
-    pub position: Vec3,
+    pub head_orientation: Quat,
+    pub head_position: Vec3,
+    pub left_orientation: Quat,
+    pub left_position: Vec3,
+    pub right_orientation: Quat,
+    pub right_position: Vec3,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, Default)]
+pub struct VideoSettinngInfo{
+    pub stream_view_resolution: UVec2,
+    pub target_view_resolution: UVec2,
+    pub fps: f32,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
@@ -109,7 +120,8 @@ pub enum EventType {
     ServerRequestsSelfRestart,
     NetworkStatistics(NetworkStatistics),
     BitrateSelection(BitrateSelection),
-    MotionStatistics(MotionStatistics)
+    MotionStatistics(MotionStatistics),
+    VideoSettinngInfo(VideoSettinngInfo)
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -121,15 +133,18 @@ pub struct Event {
 pub fn send_event(event_type: EventType) {
     // only send the data we want to the log file
     match event_type {
-        EventType::NetworkStatistics(_) => {
-            trace!(target: "alvr_log_event", "{}", serde_json::to_string(&event_type).unwrap());
-        }
-        EventType::BitrateSelection(_) => {
-            trace!(target: "alvr_log_event","{}", serde_json::to_string(&event_type).unwrap());
-        }
+        // EventType::NetworkStatistics(_) => {
+        //     trace!(target: "alvr_log_event", "{}", serde_json::to_string(&event_type).unwrap());
+        // }
+        // EventType::BitrateSelection(_) => {
+        //     trace!(target: "alvr_log_event","{}", serde_json::to_string(&event_type).unwrap());
+        // }
         EventType::MotionStatistics(_) => {
             trace!(target: "alvr_log_event","{}", serde_json::to_string(&event_type).unwrap());
         }
+        // EventType::VideoSettinngInfo(_) =>{
+        //     trace!(target:"alvr_log_event", "{}", serde_json::to_string(&event_type).unwrap());
+        // }
         _ => {
             info!("{}", serde_json::to_string(&event_type).unwrap());
         }
